@@ -18,15 +18,15 @@ async function fetchPage(url, baseUrl, options = {}) {
       });
 
       if (response.status === 404) {
-        const err = new Error("Page not found");
-        err.status = 404;
-        throw err;
+        const error = new Error("Page not found");
+        error.status = 404;
+        throw error;
       }
 
       return response.data;
-    } catch (err) {
-      if (err.status === 404) throw err;
-      if (attempt === retries) throw err;
+    } catch (error) {
+      if (error.status === 404) throw error;
+      if (attempt === retries) throw error;
       await sleep(500 * (attempt + 1));
     }
   }

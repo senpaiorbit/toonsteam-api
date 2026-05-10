@@ -1,6 +1,5 @@
 const store = new Map();
 
-// TTL constants (ms)
 const TTL = {
   home: 5 * 60 * 1000,
   search: 5 * 60 * 1000,

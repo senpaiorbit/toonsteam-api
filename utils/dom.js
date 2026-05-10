@@ -1,8 +1,3 @@
-/**
- * Reusable DOM helpers for cheerio.
- * No axios calls here — pure parsing utilities.
- */
-
 export function normalizeImageUrl(src) {
   if (!src) return null;
   if (src.startsWith("//")) return "https:" + src;
@@ -23,12 +18,10 @@ export function parsePostCard($, el) {
   const rating = $el.find(".vote").text().replace("TMDB", "").trim() || null;
   const id = $el.closest("li[id]").attr("id") || null;
 
-  // Detect content type from URL or class
   let contentType = "series";
   if (url?.includes("/movies/")) contentType = "movie";
   else if (url?.includes("/episode/")) contentType = "episode";
 
-  // Extract categories from class list
   const liClass = $el.closest("li").attr("class") || "";
   const categories = (liClass.match(/category-([^\s]+)/g) || [])
     .map((c) => c.replace("category-", "").replace(/-/g, " "))
@@ -44,7 +37,6 @@ export function parseEpisodeCard($, el) {
   const image = normalizeImageUrl($el.find("img").first().attr("src"));
   const episodeNumber = $el.find(".num-epi").text().trim();
   const time = $el.find(".time").text().trim();
-
   return { title, image, episodeNumber, time, url };
 }
 
