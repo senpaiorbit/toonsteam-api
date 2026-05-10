@@ -1,4 +1,4 @@
-import toonstream from "../providers/toonstream/index.js";
+import toonstream from "../providers/toonsteam/index.js";
 
 const providers = {
   toonstream,
