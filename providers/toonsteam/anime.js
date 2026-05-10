@@ -1,6 +1,25 @@
+/**
+ * toonstream/anime.js
+ * Provider methods — fetch + parse for each page type.
+ *
+ * FIX in getSeasonEpisodes:
+ *   The admin-ajax.php endpoint returns a FULL WordPress page HTML (not a
+ *   fragment). The episode list is inside ul#episode_by_temp.
+ *   Old selector: "li article.episodes"  ← works but misses articles without
+ *   the class in some responses. Use the same robust selector as parseEpisodeList:
+ *   "#episode_by_temp li article"
+ *
+ *   Also: the old code used a dynamic import of cheerio/axios inside the function.
+ *   Moved to top-level static imports for reliability on Vercel.
+ */
+
+import axios from "axios";
+import * as cheerio from "cheerio";
 import http from "../../utils/http.js";
 import cache from "../../utils/cache.js";
+import { buildHeaders } from "../../utils/request.js";
 import { BASE_URLS } from "../../constants/baseurl.js";
+import { normalizeImageUrl, extractSlugFromUrl } from "../../utils/dom.js";
 import {
   parseHomePage,
   parseSeriesPage,
@@ -14,6 +33,8 @@ import {
 
 const BASE = BASE_URLS.toonstream;
 
+// ─── HOME ─────────────────────────────────────────────────────────────────────
+
 export async function getHome() {
   const cacheKey = "home";
   const cached = cache.get(cacheKey);
@@ -24,6 +45,8 @@ export async function getHome() {
   cache.set(cacheKey, data, "home");
   return data;
 }
+
+// ─── SERIES ───────────────────────────────────────────────────────────────────
 
 export async function getSeriesInfo(slug) {
   const cacheKey = `series:${slug}`;
@@ -37,6 +60,15 @@ export async function getSeriesInfo(slug) {
   return data;
 }
 
+// ─── SEASON EPISODES (AJAX) ───────────────────────────────────────────────────
+//
+// FIX: The wp-admin/admin-ajax.php endpoint returns a full WordPress page.
+// The episode list is in ul#episode_by_temp inside that page.
+// Use "#episode_by_temp li article" — same selector as parseEpisodeList().
+//
+// Also guard: if the response has no #episode_by_temp, fall back to
+// "li article.episodes" for safety.
+
 export async function getSeasonEpisodes(postId, seasonNumber) {
   const cacheKey = `episodes:${postId}:${seasonNumber}`;
   const cached = cache.get(cacheKey);
@@ -46,8 +78,6 @@ export async function getSeasonEpisodes(postId, seasonNumber) {
   let episodes = [];
 
   try {
-    const axios = (await import("axios")).default;
-    const { buildHeaders } = await import("../../utils/request.js");
     const response = await axios.post(
       ajaxUrl,
       new URLSearchParams({
@@ -66,32 +96,43 @@ export async function getSeasonEpisodes(postId, seasonNumber) {
     );
 
     if (response.data) {
-      const { load } = await import("cheerio");
-      const $ = load(response.data);
-      $("li article.episodes").each((_, el) => {
-        const href = $(el).find("a.lnk-blk").attr("href");
-        const title = $(el).find(".entry-title").text().trim();
-        const image = $(el).find("img").attr("src");
-        const epNum = $(el).find(".num-epi").text().trim();
-        const time = $(el).find(".time").text().trim();
-        const normalizedImg = image?.startsWith("//") ? "https:" + image : image;
-        episodes.push({
-          title,
-          episodeNumber: epNum,
-          image: normalizedImg || null,
-          time,
-          url: href,
-          slug: href ? href.replace(/\/$/, "").split("/").pop() : null,
-        });
+      const $ = cheerio.load(response.data);
+
+      // Primary: use #episode_by_temp (full-page response structure)
+      const container = $("#episode_by_temp");
+      const selector = container.length
+        ? "#episode_by_temp li article"
+        : "li article";
+
+      $(selector).each((_, el) => {
+        const href = $(el).find("a.lnk-blk").attr("href") || null;
+        const title = $(el).find(".entry-title").text().trim() || null;
+        const imgSrc = $(el).find("img").attr("src") || null;
+        const epNum = $(el).find(".num-epi").text().trim() || null;
+        const time = $(el).find(".time").text().trim() || null;
+        const image = normalizeImageUrl(imgSrc);
+
+        if (title || href) {
+          episodes.push({
+            title,
+            episodeNumber: epNum,
+            image,
+            time,
+            url: href,
+            slug: extractSlugFromUrl(href),
+          });
+        }
       });
     }
   } catch {
-    // AJAX failed — return empty, caller handles fallback
+    // AJAX failed — return empty, caller handles gracefully
   }
 
   cache.set(cacheKey, episodes, "series");
   return episodes;
 }
+
+// ─── EPISODE ──────────────────────────────────────────────────────────────────
 
 export async function getEpisodeInfo(slug) {
   const cacheKey = `episode:${slug}`;
@@ -104,6 +145,8 @@ export async function getEpisodeInfo(slug) {
   cache.set(cacheKey, data, "episode");
   return data;
 }
+
+// ─── MOVIES ───────────────────────────────────────────────────────────────────
 
 export async function getMoviesList(page = 1) {
   const cacheKey = `movies:page:${page}`;
@@ -129,6 +172,8 @@ export async function getMovieSingle(slug) {
   return data;
 }
 
+// ─── CATEGORY ─────────────────────────────────────────────────────────────────
+
 export async function getCategoryPage(path, page = 1) {
   const cacheKey = `category:${path}:${page}`;
   const cached = cache.get(cacheKey);
@@ -142,6 +187,8 @@ export async function getCategoryPage(path, page = 1) {
   return data;
 }
 
+// ─── CAST ─────────────────────────────────────────────────────────────────────
+
 export async function getCastPage(name, page = 1) {
   const cacheKey = `cast:${name}:${page}`;
   const cached = cache.get(cacheKey);
@@ -154,6 +201,8 @@ export async function getCastPage(name, page = 1) {
   cache.set(cacheKey, data, "cast");
   return data;
 }
+
+// ─── LETTER ───────────────────────────────────────────────────────────────────
 
 export async function getLetterPage(letter, page = 1) {
   const cacheKey = `letter:${letter}:${page}`;
