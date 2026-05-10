@@ -1,7 +1,12 @@
 export function normalizeImageUrl(src) {
   if (!src) return null;
+  src = src.trim();
+  // Protocol-relative  → https
   if (src.startsWith("//")) return "https:" + src;
-  if (src.startsWith("http")) return src;
+  // Already absolute
+  if (src.startsWith("http://") || src.startsWith("https://")) return src;
+  // Relative path — prepend origin placeholder so callers know it's relative
+  if (src.startsWith("/")) return "https://toonstream.vip" + src;
   return src;
 }
 
