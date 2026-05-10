@@ -4,6 +4,7 @@ export default async function handler(req, res) {
 
     // Check URL
     if (!url) {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
       return res.status(400).send("Missing ?url=");
     }
 
@@ -13,6 +14,7 @@ export default async function handler(req, res) {
     try {
       targetUrl = new URL(url);
     } catch {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
       return res.status(400).send("Invalid URL");
     }
 
@@ -32,21 +34,27 @@ export default async function handler(req, res) {
       },
     });
 
-    // Get HTML
+    // Get raw HTML
     const html = await response.text();
 
-    // Headers
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    // Return as plain text
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
 
     // Enable CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
 
-    // Return raw HTML
+    // Optional extra headers
+    res.setHeader("X-Content-Type-Options", "nosniff");
+
+    // Send raw HTML as text
     return res.status(200).send(html);
   } catch (error) {
-    return res.status(500).send(`
-      <h1>Scraper Error</h1>
-      <pre>${error.message}</pre>
-    `);
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+
+    return res.status(500).send(
+`Scraper Error
+
+${error.message}`
+    );
   }
 }
