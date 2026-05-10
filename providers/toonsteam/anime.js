@@ -13,11 +13,8 @@
  *   Moved to top-level static imports for reliability on Vercel.
  */
 
-import axios from "axios";
-import * as cheerio from "cheerio";
 import http from "../../utils/http.js";
 import cache from "../../utils/cache.js";
-import { buildHeaders } from "../../utils/request.js";
 import { BASE_URLS } from "../../constants/baseurl.js";
 import { normalizeImageUrl, extractSlugFromUrl } from "../../utils/dom.js";
 import {
@@ -78,52 +75,43 @@ export async function getSeasonEpisodes(postId, seasonNumber) {
   let episodes = [];
 
   try {
-    const response = await axios.post(
+    // FIX: use http.postAndParse — normalises protocol-relative image URLs
+    // automatically and returns a ready cheerio $ instance.
+    const $ = await http.postAndParse(
       ajaxUrl,
       new URLSearchParams({
         action: "action_select_season",
         season: seasonNumber,
         post: postId,
       }),
-      {
-        headers: {
-          ...buildHeaders(BASE, `${BASE}/`),
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-        timeout: 15000,
-      }
+      BASE
     );
 
-    if (response.data) {
-      const $ = cheerio.load(response.data);
+    // Primary: use #episode_by_temp (full-page response structure)
+    const container = $("#episode_by_temp");
+    const selector  = container.length
+      ? "#episode_by_temp li article"
+      : "li article";
 
-      // Primary: use #episode_by_temp (full-page response structure)
-      const container = $("#episode_by_temp");
-      const selector = container.length
-        ? "#episode_by_temp li article"
-        : "li article";
+    $(selector).each((_, el) => {
+      const href  = $(el).find("a.lnk-blk").attr("href") || null;
+      const title = $(el).find(".entry-title").text().trim() || null;
+      const imgEl = $(el).find("img").first();
+      const image = normalizeImageUrl(imgEl.attr("src") || imgEl.attr("data-src"));
+      const epNum = $(el).find(".num-epi").text().trim() || null;
+      const time  = $(el).find(".time").text().trim() || null;
 
-      $(selector).each((_, el) => {
-        const href = $(el).find("a.lnk-blk").attr("href") || null;
-        const title = $(el).find(".entry-title").text().trim() || null;
-        const imgSrc = $(el).find("img").attr("src") || null;
-        const epNum = $(el).find(".num-epi").text().trim() || null;
-        const time = $(el).find(".time").text().trim() || null;
-        const image = normalizeImageUrl(imgSrc);
-
-        if (title || href) {
-          episodes.push({
-            title,
-            episodeNumber: epNum,
-            image,
-            time,
-            url: href,
-            slug: extractSlugFromUrl(href),
-          });
-        }
-      });
-    }
+      if (title || href) {
+        episodes.push({
+          title,
+          episodeNumber: epNum,
+          image,
+          time,
+          url: href,
+          slug: extractSlugFromUrl(href),
+        });
+      }
+    });
   } catch {
     // AJAX failed — return empty, caller handles gracefully
   }
