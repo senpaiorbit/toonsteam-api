@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { handle } from "hono/vercel";
 import { getProvider, getProviderName } from "../core/providerManager.js";
 
+// Tell Vercel to use Node.js runtime (not Edge)
 export const config = { runtime: "nodejs" };
 
 const app = new Hono({ strict: false });
@@ -488,5 +488,7 @@ app.onError((error, c) => {
 });
 
 // ─── EXPORT FOR VERCEL ───────────────────────────────────────────────────────
+// Vercel Node.js serverless functions support the Web Fetch API natively.
+// app.fetch is a standard (Request) => Response handler — no adapter needed.
 
-export default handle(app);
+export default app.fetch;
