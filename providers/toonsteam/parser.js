@@ -78,15 +78,40 @@ export function parseHomePage(html) {
   });
 
   // ── Series / Movies widget helper ─────────────────────────────────────────
+  //
+  // FIX 1 — selector: use the section-level descendant selector which works
+  //   for both wdgt-home AND wdgt-sidebar sections. Also add -all tab
+  //   container as a precise fallback.
+  //
+  // FIX 2 — image: try data-src fallback for lazy-load <img> tags.
+  //
+  // FIX 3 — rating: `|| null` was silently dropping "0" scores (e.g.
+  //   Karna the Guardian has TMDB 0). Use explicit empty-string check.
   function scrapeMoviesWidget(sectionId) {
     const items = [];
-    $(`#${sectionId} .post-lst li article`).each((_, el) => {
-      const url = $(el).find("a.lnk-blk").attr("href") || null;
+
+    // Try section-scoped selector first; if the section doesn't exist fall
+    // back to the inner -all tab container (same data, more specific path)
+    const baseSelector = $(`#${sectionId}`).length
+      ? `#${sectionId} .post-lst li article`
+      : `#${sectionId}-all .post-lst li article`;
+
+    $(baseSelector).each((_, el) => {
+      const url   = $(el).find("a.lnk-blk").attr("href") || null;
       const title = txt($, ".entry-title", el);
-      const image = normalizeImageUrl($(el).find("img").attr("src"));
+      const imgEl = $(el).find("img").first();
+      // FIX: also check data-src for lazy-loaded images
+      const image = normalizeImageUrl(
+        imgEl.attr("src") || imgEl.attr("data-src") || null
+      );
+
       // vote: <span class="vote"><span>TMDB</span> 7.25</span>
-      const voteEl = $(el).find(".vote");
-      const rating = voteEl.clone().children().remove().end().text().trim() || null;
+      // Clone + strip inner spans to get the bare score text node.
+      const voteEl    = $(el).find(".vote");
+      const ratingRaw = voteEl.clone().children().remove().end().text().trim();
+      // FIX: "0" is a valid rating — only map empty string to null
+      const rating = ratingRaw !== "" ? ratingRaw : null;
+
       if (title) {
         items.push({
           title,
@@ -421,7 +446,7 @@ export function parseMoviesListPage(html) {
     const title = txt($, ".entry-title", article);
     const image = normalizeImageUrl(article.find("img").attr("src"));
     const voteEl = article.find(".vote");
-    const rating = voteEl.clone().children().remove().end().text().trim() || null;
+    const ratingRaw = voteEl.clone().children().remove().end().text().trim(); const rating = ratingRaw !== "" ? ratingRaw : null;
     const liClass = $(li).attr("class") || "";
     const contentType =
       url.includes("/movies/") || liClass.includes(" movies ") ? "movie" : "series";
@@ -526,7 +551,7 @@ export function parseSearchPage(html, query) {
     const title = txt($, ".entry-title", article);
     const image = normalizeImageUrl(article.find("img").attr("src"));
     const voteEl = article.find(".vote");
-    const rating = voteEl.clone().children().remove().end().text().trim() || null;
+    const ratingRaw = voteEl.clone().children().remove().end().text().trim(); const rating = ratingRaw !== "" ? ratingRaw : null;
     const id = $(li).attr("id") || null;
     const liClass = $(li).attr("class") || "";
     const contentType =
@@ -567,7 +592,7 @@ export function parseCategoryPage(html, path) {
     const title = txt($, ".entry-title", article);
     const image = normalizeImageUrl(article.find("img").attr("src"));
     const voteEl = article.find(".vote");
-    const rating = voteEl.clone().children().remove().end().text().trim() || null;
+    const ratingRaw = voteEl.clone().children().remove().end().text().trim(); const rating = ratingRaw !== "" ? ratingRaw : null;
     const liClass = $(li).attr("class") || "";
     const contentType =
       liClass.includes(" movies ") || url.includes("/movies/") ? "movie" : "series";
@@ -595,7 +620,7 @@ export function parseCastPage(html, name) {
     const title = txt($, ".entry-title", article);
     const image = normalizeImageUrl(article.find("img").attr("src"));
     const voteEl = article.find(".vote");
-    const rating = voteEl.clone().children().remove().end().text().trim() || null;
+    const ratingRaw = voteEl.clone().children().remove().end().text().trim(); const rating = ratingRaw !== "" ? ratingRaw : null;
     const contentType = url.includes("/movies/") ? "movie" : "series";
     items.push({ title, image, rating, url, slug: extractSlugFromUrl(url), contentType });
   });
