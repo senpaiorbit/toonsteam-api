@@ -1,8 +1,11 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { handle } from "hono/vercel";
 import { getProvider, getProviderName } from "../core/providerManager.js";
 
-const app = new Hono();
+export const config = { runtime: "nodejs" };
+
+const app = new Hono({ strict: false });
 
 // ─── CORS ────────────────────────────────────────────────────────────────────
 
@@ -486,4 +489,4 @@ app.onError((error, c) => {
 
 // ─── EXPORT FOR VERCEL ───────────────────────────────────────────────────────
 
-export default app.fetch;
+export default handle(app);
