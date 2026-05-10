@@ -1,0 +1,16 @@
+{
+  "name": "toonstream-api",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch api/index.js",
+    "start": "node api/index.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "hono": "^4.7.4"
+  }
+}
