@@ -1,15 +1,9 @@
 // ============================================================
 // providers/toonstream/anime.js
-// Scraping logic for:
-//   - Anime / series details
-//   - Movie details
-//   - Episode streaming sources
-//   - Recent (latest updated) anime
-//   - Trending anime
+// Patched: better selectors, added getHomePage()
 // ============================================================
-
 import { fetchHtml } from "../../utils/http.js";
-import { loadHtml, normaliseImageUrl, extractSlug } from "../../utils/dom.js";
+import { loadHtml, normaliseImageUrl, safeHtml } from "../../utils/dom.js";
 import {
   parseCardList,
   parseGenres,
@@ -20,40 +14,14 @@ import {
 } from "./parser.js";
 import { cacheGet, cacheSet } from "../../utils/cache.js";
 import { TOONSTREAM_BASE } from "../../constants/baseurl.js";
+import config from "../../core/config.js"; // [NEW] for homePageTTL
 
-// ─── Helpers ────────────────────────────────────────────────
+// ─── URL builders ───────────────────────────────────────────
+const seriesUrl = (id) => `${TOONSTREAM_BASE}/series/${id}/`;
+const movieUrl = (id) => `${TOONSTREAM_BASE}/movies/${id}/`;
+const episodeUrl = (id) => `${TOONSTREAM_BASE}/episode/${id}/`;
 
-/**
- * Build the full URL for a series by its slug.
- * @param {string} id - slug, e.g. "jujutsu-kaisen"
- */
-function seriesUrl(id) {
-  return `${TOONSTREAM_BASE}/series/${id}/`;
-}
-
-/**
- * Build the full URL for a movie by its slug.
- */
-function movieUrl(id) {
-  return `${TOONSTREAM_BASE}/movies/${id}/`;
-}
-
-/**
- * Build the full URL for an episode by its slug.
- */
-function episodeUrl(id) {
-  return `${TOONSTREAM_BASE}/episode/${id}/`;
-}
-
-// ─── Series / Anime Details ─────────────────────────────────
-
-/**
- * Fetch full details for a series (anime) by its slug.
- * Scrapes: title, description, genres, year, seasons, episodes.
- *
- * @param {string} id - Series slug (e.g. "jujutsu-kaisen")
- * @returns {Promise<object>}
- */
+// ─── Series Details ─────────────────────────────────────────
 export async function getAnimeDetails(id) {
   const cacheKey = `series:${id}`;
   const cached = cacheGet(cacheKey);
@@ -63,20 +31,17 @@ export async function getAnimeDetails(id) {
   const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
   const $ = loadHtml(html);
 
-  // Basic metadata
-  const title = $("h1.entry-title").first().text().trim();
+  const title = $("h1.entry-title, h1.title").first().text().trim();
   const image = normaliseImageUrl(
-    $(".post-thumbnail figure img").first().attr("src") || ""
+    $(".post-thumbnail figure img, .poster img").first().attr("src") || ""
   );
-  const description = $(".description p").first().text().trim();
-  const year = $("span.year").first().text().trim();
-  const rating = $("span.vote span.num").first().text().trim();
-  const duration = $("span.duration").first().text().trim();
-  const views = $("span.views span").first().text().trim();
-
-  // Season + episode counts from the meta spans
-  const totalSeasons = $("span.seasons span").first().text().trim();
-  const totalEpisodes = $("span.episodes span").first().text().trim();
+  const description = $(".description p, .entry-content p").first().text().trim();
+  const year = $("span.year, .release-year").first().text().trim();
+  const rating = $("span.vote span.num, .rating-value").first().text().trim();
+  const duration = $("span.duration, .runtime").first().text().trim();
+  const views = $("span.views span, .view-count").first().text().trim();
+  const totalSeasons = $("span.seasons span, .season-count").first().text().trim();
+  const totalEpisodes = $("span.episodes span, .episode-count").first().text().trim();
 
   const genres = parseGenres($);
   const seasons = parseSeasons($);
@@ -114,13 +79,6 @@ export async function getAnimeDetails(id) {
 }
 
 // ─── Movie Details ──────────────────────────────────────────
-
-/**
- * Fetch full details for a movie by its slug.
- *
- * @param {string} id - Movie slug (e.g. "jujutsu-kaisen-0")
- * @returns {Promise<object>}
- */
 export async function getMovieDetails(id) {
   const cacheKey = `movie:${id}`;
   const cached = cacheGet(cacheKey);
@@ -130,19 +88,18 @@ export async function getMovieDetails(id) {
   const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
   const $ = loadHtml(html);
 
-  const title = $("h1.entry-title").first().text().trim();
+  const title = $("h1.entry-title, h1.title").first().text().trim();
   const image = normaliseImageUrl(
-    $(".post-thumbnail figure img").first().attr("src") || ""
+    $(".post-thumbnail figure img, .poster img").first().attr("src") || ""
   );
-  const description = $(".description p").first().text().trim();
-  const year = $("span.year").first().text().trim();
-  const rating = $("span.vote span.num").first().text().trim();
-  const duration = $("span.duration").first().text().trim();
-
+  const description = $(".description p, .entry-content p").first().text().trim();
+  const year = $("span.year, .release-year").first().text().trim();
+  const rating = $("span.vote span.num, .rating-value").first().text().trim();
+  const duration = $("span.duration, .runtime").first().text().trim();
   const genres = parseGenres($);
   const sources = parseSources($);
 
-  // Cast & Director
+  // Cast
   const cast = [];
   $("ul.cast-lst li").each((_, el) => {
     const label = $(el).find("span").first().text().trim();
@@ -151,8 +108,8 @@ export async function getMovieDetails(id) {
     if (label && names.length) cast.push({ label, names });
   });
 
-  // Related movies
-  const related = parseCardList($, ".owl-carousel .post");
+  // Related
+  const related = parseCardList($, ".related-posts .post, .owl-carousel .post");
 
   const result = {
     id,
@@ -173,15 +130,7 @@ export async function getMovieDetails(id) {
   return result;
 }
 
-// ─── Episode Streaming Sources ──────────────────────────────
-
-/**
- * Fetch streaming server sources for an episode.
- * ToonStream episode URLs: /episode/jujutsu-kaisen-1x1/
- *
- * @param {string} id - Episode slug (e.g. "jujutsu-kaisen-1x1")
- * @returns {Promise<object>}
- */
+// ─── Episode Sources ────────────────────────────────────────
 export async function getEpisodeSources(id) {
   const cacheKey = `episode:${id}`;
   const cached = cacheGet(cacheKey);
@@ -191,20 +140,16 @@ export async function getEpisodeSources(id) {
   const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
   const $ = loadHtml(html);
 
-  const title = $("h1.entry-title").first().text().trim();
+  const title = $("h1.entry-title, h1.title").first().text().trim();
   const image = normaliseImageUrl(
-    $(".post-thumbnail figure img").first().attr("src") || ""
+    $(".post-thumbnail figure img, .poster img").first().attr("src") || ""
   );
-  const description = $(".description").first().text().trim();
-  const year = $("span.year").first().text().trim();
-  const duration = $("span.duration").first().text().trim();
-  const rating = $("span.vote span.num").first().text().trim();
+  const year = $("span.year, .release-year").first().text().trim();
+  const duration = $("span.duration, .runtime").first().text().trim();
+  const rating = $("span.vote span.num, .rating-value").first().text().trim();
   const genres = parseGenres($);
-
   const sources = parseSources($);
   const nav = parseEpisodeNav($);
-
-  // Season episode list shown below the player
   const episodes = parseEpisodeList($);
 
   const result = {
@@ -212,7 +157,6 @@ export async function getEpisodeSources(id) {
     title,
     url,
     image,
-    description: description || null,
     year: year || null,
     duration: duration || null,
     rating: rating || null,
@@ -222,19 +166,11 @@ export async function getEpisodeSources(id) {
     episodes,
   };
 
-  // Cache episodes for 5 minutes (sources don't change often)
-  cacheSet(cacheKey, result, 300);
+  cacheSet(cacheKey, result);
   return result;
 }
 
-// ─── Recent (Latest Updated) ────────────────────────────────
-
-/**
- * Scrape recently updated anime from the main series archive.
- * URL: /series/ — newest additions are at the top.
- *
- * @returns {Promise<object[]>}
- */
+// ─── Recent / Trending / Movies ─────────────────────────────
 export async function getRecent() {
   const cacheKey = "recent";
   const cached = cacheGet(cacheKey);
@@ -243,47 +179,24 @@ export async function getRecent() {
   const url = `${TOONSTREAM_BASE}/series/`;
   const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
   const $ = loadHtml(html);
-
   const results = parseCardList($);
-
-  // Cache for 3 minutes (updates frequently)
   cacheSet(cacheKey, results, 180);
   return results;
 }
 
-// ─── Trending ───────────────────────────────────────────────
-
-/**
- * Scrape trending anime from the homepage.
- * ToonStream's homepage shows featured/trending content in carousels.
- * We fall back to the series archive if the home page structure differs.
- *
- * @returns {Promise<object[]>}
- */
 export async function getTrending() {
   const cacheKey = "trending";
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  // The /home/ page has a hero slider and trending sections
   const url = `${TOONSTREAM_BASE}/home/`;
   const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
   const $ = loadHtml(html);
 
-  // Try carousel first (owl-carousel typically shows featured/trending)
-  let results = parseCardList($, ".owl-carousel li, .owl-carousel article");
+  let results = parseCardList($, ".owl-carousel li, .owl-carousel article, .featured-slider .item");
+  if (!results.length) results = parseCardList($);
+  if (!results.length) return getRecent();
 
-  // If carousel is empty, fall back to the first post list on the page
-  if (!results.length) {
-    results = parseCardList($);
-  }
-
-  // If still empty, fall back to series archive
-  if (!results.length) {
-    return getRecent();
-  }
-
-  // Deduplicate by URL
   const seen = new Set();
   const unique = results.filter((item) => {
     if (seen.has(item.url)) return false;
@@ -291,18 +204,10 @@ export async function getTrending() {
     return true;
   });
 
-  // Cache for 10 minutes
   cacheSet(cacheKey, unique, 600);
   return unique;
 }
 
-// ─── Recent Movies ──────────────────────────────────────────
-
-/**
- * Scrape recently added movies from the movies archive.
- *
- * @returns {Promise<object[]>}
- */
 export async function getRecentMovies() {
   const cacheKey = "recent-movies";
   const cached = cacheGet(cacheKey);
@@ -311,8 +216,90 @@ export async function getRecentMovies() {
   const url = `${TOONSTREAM_BASE}/movies/`;
   const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
   const $ = loadHtml(html);
-
   const results = parseCardList($);
   cacheSet(cacheKey, results, 180);
   return results;
+}
+
+// ─── NEW: Aggregated Homepage ───────────────────────────────
+/**
+ * Scrapes the homepage and returns a rich structured object
+ * containing latest episodes, series, movies, random picks, languages, featured.
+ * This is what you expected the API to return.
+ */
+export async function getHomePage() {
+  const cacheKey = "homepage";
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const url = TOONSTREAM_BASE + "/home/";
+  const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
+  const $ = loadHtml(html);
+
+  // Container widgets – usually .widget or .sidebar .widget
+  const widgets = $(".widget, .home-widget");
+
+  const latestEpisodes = [];
+  const latestSeries = [];
+  const latestMovies = [];
+  const randomSeries = [];
+  const randomMovies = [];
+  const languages = [];
+  const featured = [];
+
+  widgets.each((_, widget) => {
+    const $w = $(widget);
+    const title = $w.find("h2.widget-title, .widget-title, h3").first().text().trim().toLowerCase();
+
+    const cards = parseCardList($, $w.find("li, .post, article").toString());
+
+    if (title.includes("latest episode")) {
+      latestEpisodes.push(...cards);
+    } else if (title.includes("latest series")) {
+      latestSeries.push(...cards);
+    } else if (title.includes("latest movie")) {
+      latestMovies.push(...cards);
+    } else if (title.includes("random series")) {
+      randomSeries.push(...cards);
+    } else if (title.includes("random movie")) {
+      randomMovies.push(...cards);
+    } else if (title.includes("language")) {
+      // Language items are usually a list of links without images
+      $w.find("li a").each((__, a) => {
+        const lang = $(a).text().trim();
+        if (lang) languages.push(lang);
+      });
+    } else if (title.includes("featured") || title.includes("trending")) {
+      featured.push(...cards);
+    }
+  });
+
+  // Fallback: if no widget titles, grab everything from carousels and default post lists
+  if (!latestEpisodes.length && !latestSeries.length) {
+    const allCards = parseCardList($);
+    featured.push(...allCards);
+  }
+
+  const result = {
+    latestEpisodes: dedupeCards(latestEpisodes),
+    latestSeries: dedupeCards(latestSeries),
+    latestMovies: dedupeCards(latestMovies),
+    randomSeries: dedupeCards(randomSeries),
+    randomMovies: dedupeCards(randomMovies),
+    languages: [...new Set(languages)],
+    featured: dedupeCards(featured),
+  };
+
+  cacheSet(cacheKey, result, config.cache.homePageTTL);
+  return result;
+}
+
+/** Deduplicate cards by URL */
+function dedupeCards(cards) {
+  const seen = new Set();
+  return cards.filter((card) => {
+    if (seen.has(card.url)) return false;
+    seen.add(card.url);
+    return true;
+  });
 }
