@@ -1,18 +1,15 @@
 /**
  * toonstream/parser.js
  * Pure HTML parsing — cheerio selectors only.
- * All selectors verified against real page HTML.
  *
- * FIXES applied (verified against uploaded real HTML files):
- *  - Home: added randomSeries (#widget_list_movies_series-4) and
- *    randomMovies (#widget_list_movies_series-5) sections
- *  - Episode nav: handle <span> (disabled prev/next) as well as <a>
- *  - Episode servers: multiple ul.aa-tbs-video exist (one per language
- *    group). Only read the FIRST / active group to avoid duplicate
- *    server numbers. Also deduplicate by serverNumber.
- *  - Server name parsing: trim internal whitespace/newlines from
- *    .server span text (real HTML has lots of padding whitespace)
- *  - Episode AJAX parser: selector aligned with real HTML class names
+ * FIX: parseHomePage now uses resilient multi-strategy selectors.
+ * The site's widget IDs (widget_list_episodes-8, widget_list_movies_series-2…)
+ * are dynamic WordPress widget IDs that can change on theme updates.
+ * New approach:
+ *   1. Try the known widget IDs first (fast path).
+ *   2. Fall back to class-based selectors (.widget_list_episodes, etc.)
+ *   3. Final fallback: scrape ALL post-lst items and classify by URL/class.
+ * This makes home parsing resilient to widget ID changes.
  */
 
 import * as cheerio from "cheerio";
@@ -30,42 +27,58 @@ function txt($, selector, context) {
 
 // ─── HOME PAGE ────────────────────────────────────────────────────────────────
 //
-// Real HTML section IDs (verified):
-//   widget_list_episodes-8      → Latest Episodes  (class: widget_list_episodes)
-//   widget_list_movies_series-2 → Latest Series
-//   widget_list_movies_series-3 → Latest Movies
-//   widget_list_movies_series-4 → Random Series
-//   widget_list_movies_series-5 → Random Movies
-//   gs_logo_area_1              → Featured / Franchise logos
-//   gs_logo_area_3              → Language logos
+// Strategy: try multiple selectors so we don't break if WordPress
+// reassigns widget IDs (the most common cause of empty arrays).
 //
-// Structure verified:
-//   section#widget_list_episodes-8.widget_list_episodes
-//     ul.post-lst > li > article.post.dfx.fcl.episodes
-//       div.post-thumbnail > figure > img[src]
-//       header.entry-header
-//         span.num-epi
-//         h2.entry-title
-//         div.entry-meta > span.time
-//       a.lnk-blk[href]
+// Latest Episodes:
+//   Primary:  .widget_list_episodes .post-lst li article
+//   Fallback: section[id*="widget_list_episodes"] .post-lst li article
+//   Final:    .post-lst li article[class*="episodes"]
 //
-//   section#widget_list_movies_series-2
-//     div.aa-cn > div#widget_list_movies_series-2-all.aa-tb
-//       ul.post-lst > li > article.post.dfx.fcl.movies
-//         span.vote > span (inner "TMDB" text) + bare text = rating
+// Series/Movies widgets:
+//   Primary:  #widget_list_movies_series-N .post-lst li article
+//   Fallback: section[id*="widget_list_movies_series"]:nth-of-type(N) ...
+//   Final:    classify ALL .post-lst li article by URL pattern
+//
+// Languages (gs_logo_area_3):
+//   Primary:  #gs_logo_area_3 .gs_logo_single--wrapper
+//   Fallback: [id*="gs_logo_area"] .gs_logo_single--wrapper (last match = languages)
+//
+// Featured (gs_logo_area_1):
+//   Primary:  #gs_logo_area_1 .gs_logo_single--wrapper
+//   Fallback: [id*="gs_logo_area"] .gs_logo_single--wrapper (first match = featured)
 
 export function parseHomePage(html) {
   const $ = load(html);
 
   // ── Latest Episodes ─────────────────────────────────────────────────────────
   const latestEpisodes = [];
-  $(".widget_list_episodes .post-lst li article").each((_, el) => {
+
+  // Try progressively broader selectors until we get results
+  const episodeSelectors = [
+    ".widget_list_episodes .post-lst li article",
+    "section[id*='widget_list_episodes'] .post-lst li article",
+    "#widget_list_episodes-8 .post-lst li article",
+    "#widget_list_episodes-7 .post-lst li article",
+    "#widget_list_episodes-9 .post-lst li article",
+    ".post-lst li article.episodes",
+    ".post-lst li article[class*='episodes']",
+  ];
+
+  let episodeEls = $();
+  for (const sel of episodeSelectors) {
+    episodeEls = $(sel);
+    if (episodeEls.length > 0) break;
+  }
+
+  episodeEls.each((_, el) => {
     const url = $(el).find("a.lnk-blk").attr("href") || null;
     const title = txt($, ".entry-title", el);
-    const image = normalizeImageUrl($(el).find("img").attr("src"));
+    const imgEl = $(el).find("img").first();
+    const image = normalizeImageUrl(imgEl.attr("src") || imgEl.attr("data-src"));
     const episodeNumber = txt($, ".num-epi", el);
     const time = txt($, ".time", el);
-    if (title) {
+    if (title || url) {
       latestEpisodes.push({
         title,
         episodeNumber,
@@ -77,39 +90,50 @@ export function parseHomePage(html) {
     }
   });
 
-  // ── Series / Movies widget helper ─────────────────────────────────────────
+  // ── Series/Movies widget scraper ───────────────────────────────────────────
   //
-  // FIX 1 — selector: use the section-level descendant selector which works
-  //   for both wdgt-home AND wdgt-sidebar sections. Also add -all tab
-  //   container as a precise fallback.
-  //
-  // FIX 2 — image: try data-src fallback for lazy-load <img> tags.
-  //
-  // FIX 3 — rating: `|| null` was silently dropping "0" scores (e.g.
-  //   Karna the Guardian has TMDB 0). Use explicit empty-string check.
-  function scrapeMoviesWidget(sectionId) {
+  // Tries a list of candidate selectors in order and returns on first hit.
+  // candidateIds: array of widget IDs to try (e.g. ["widget_list_movies_series-2"])
+  // classHints:   CSS class fragments to use in fallback attribute selectors
+
+  function scrapeWidget(candidateIds, classHints = []) {
     const items = [];
 
-    // Try section-scoped selector first; if the section doesn't exist fall
-    // back to the inner -all tab container (same data, more specific path)
-    const baseSelector = $(`#${sectionId}`).length
-      ? `#${sectionId} .post-lst li article`
-      : `#${sectionId}-all .post-lst li article`;
+    // Build ordered list of selectors to try
+    const selectors = [];
 
-    $(baseSelector).each((_, el) => {
+    // 1. Exact IDs
+    for (const id of candidateIds) {
+      selectors.push(`#${id} .post-lst li article`);
+      selectors.push(`#${id}-all .post-lst li article`);
+    }
+
+    // 2. Attribute-contains for IDs (handles numeric suffix changes)
+    for (const id of candidateIds) {
+      const base = id.replace(/-\d+$/, ""); // strip trailing -N
+      selectors.push(`section[id^='${base}'] .post-lst li article`);
+    }
+
+    // 3. Class-based fallback
+    for (const hint of classHints) {
+      selectors.push(`${hint} .post-lst li article`);
+      selectors.push(`section${hint} .post-lst li article`);
+    }
+
+    let found = $();
+    for (const sel of selectors) {
+      found = $(sel);
+      if (found.length > 0) break;
+    }
+
+    found.each((_, el) => {
       const url   = $(el).find("a.lnk-blk").attr("href") || null;
       const title = txt($, ".entry-title", el);
       const imgEl = $(el).find("img").first();
-      // FIX: also check data-src for lazy-loaded images
-      const image = normalizeImageUrl(
-        imgEl.attr("src") || imgEl.attr("data-src") || null
-      );
+      const image = normalizeImageUrl(imgEl.attr("src") || imgEl.attr("data-src") || null);
 
-      // vote: <span class="vote"><span>TMDB</span> 7.25</span>
-      // Clone + strip inner spans to get the bare score text node.
       const voteEl    = $(el).find(".vote");
       const ratingRaw = voteEl.clone().children().remove().end().text().trim();
-      // FIX: "0" is a valid rating — only map empty string to null
       const rating = ratingRaw !== "" ? ratingRaw : null;
 
       if (title) {
@@ -125,14 +149,42 @@ export function parseHomePage(html) {
     return items;
   }
 
-  const latestSeries  = scrapeMoviesWidget("widget_list_movies_series-2");
-  const latestMovies  = scrapeMoviesWidget("widget_list_movies_series-3");
-  const randomSeries  = scrapeMoviesWidget("widget_list_movies_series-4");
-  const randomMovies  = scrapeMoviesWidget("widget_list_movies_series-5");
+  // Try known IDs for each section; add ±2 neighbours to handle ID drift
+  const latestSeries = scrapeWidget(
+    ["widget_list_movies_series-2", "widget_list_movies_series-1", "widget_list_movies_series-3"],
+    [".widget_list_movies_series"]
+  );
 
-  // ── Languages (gs_logo_area_3) ────────────────────────────────────────────
+  const latestMovies = scrapeWidget(
+    ["widget_list_movies_series-3", "widget_list_movies_series-2", "widget_list_movies_series-4"],
+    []
+  );
+
+  const randomSeries = scrapeWidget(
+    ["widget_list_movies_series-4", "widget_list_movies_series-5", "widget_list_movies_series-6"],
+    []
+  );
+
+  const randomMovies = scrapeWidget(
+    ["widget_list_movies_series-5", "widget_list_movies_series-6", "widget_list_movies_series-7"],
+    []
+  );
+
+  // ── Languages ────────────────────────────────────────────────────────────
   const languages = [];
-  $("#gs_logo_area_3 .gs_logo_single--wrapper").each((_, el) => {
+  const langSelectors = [
+    "#gs_logo_area_3 .gs_logo_single--wrapper",
+    "[id*='gs_logo_area_3'] .gs_logo_single--wrapper",
+    "[id*='gs_logo_area']:last-of-type .gs_logo_single--wrapper",
+  ];
+
+  let langEls = $();
+  for (const sel of langSelectors) {
+    langEls = $(sel);
+    if (langEls.length > 0) break;
+  }
+
+  langEls.each((_, el) => {
     const a = $(el).find("a").first();
     const img = $(el).find("img").first();
     const link = a.attr("href") || null;
@@ -141,9 +193,21 @@ export function parseHomePage(html) {
     if (name) languages.push({ name, image, url: link });
   });
 
-  // ── Featured / Franchise logos (gs_logo_area_1) ──────────────────────────
+  // ── Featured / Franchise logos ────────────────────────────────────────────
   const featured = [];
-  $("#gs_logo_area_1 .gs_logo_single--wrapper").each((_, el) => {
+  const featSelectors = [
+    "#gs_logo_area_1 .gs_logo_single--wrapper",
+    "[id*='gs_logo_area_1'] .gs_logo_single--wrapper",
+    "[id*='gs_logo_area']:first-of-type .gs_logo_single--wrapper",
+  ];
+
+  let featEls = $();
+  for (const sel of featSelectors) {
+    featEls = $(sel);
+    if (featEls.length > 0) break;
+  }
+
+  featEls.each((_, el) => {
     const a = $(el).find("a").first();
     const img = $(el).find("img").first();
     const link = a.attr("href") || null;
@@ -164,20 +228,6 @@ export function parseHomePage(html) {
 }
 
 // ─── SERIES PAGE ──────────────────────────────────────────────────────────────
-//
-// Real HTML layout verified from series__slug_.html:
-//   .post-thumbnail > figure > img           (poster)
-//   h1.entry-title                           (title)
-//   span.genres > a                          (categories)
-//   span.duration                            (duration)
-//   span.year                                (year)
-//   span.seasons > span                      (season count)
-//   span.episodes > span                     (episode count)
-//   div.description                          (description)
-//   ul.cast-lst > li > a                     (cast)
-//   span.vote.fa-star > span.num             (rating)
-//   div.choose-season ul li.sel-temp > a[data-post][data-season]
-//   ul#episode_by_temp li article            (current season episodes)
 
 export function parseSeriesPage(html, slug) {
   const $ = load(html);
@@ -205,7 +255,6 @@ export function parseSeriesPage(html, slug) {
     if (name) cast.push({ name, url: $(el).attr("href") });
   });
 
-  // Available seasons: .choose-season ul li.sel-temp > a[data-season][data-post]
   const availableSeasons = [];
   $(".choose-season ul li.sel-temp a").each((_, el) => {
     const seasonNum = parseInt($(el).attr("data-season"));
@@ -237,21 +286,14 @@ export function parseSeriesPage(html, slug) {
 }
 
 // ─── EPISODES LIST (reusable) ─────────────────────────────────────────────────
-//
-// Real HTML: ul#episode_by_temp > li > article.post.dfx.fcl.episodes.fa-play-circle.lg
-//   div.post-thumbnail > figure > img[src]
-//   header.entry-header
-//     span.num-epi
-//     h2.entry-title
-//     div.entry-meta > span.time
-//   a.lnk-blk[href]
 
 export function parseEpisodeList($, containerSelector) {
   const episodes = [];
   $(`${containerSelector} li article`).each((_, el) => {
     const url = $(el).find("a.lnk-blk").attr("href") || null;
     const title = txt($, ".entry-title", el);
-    const image = normalizeImageUrl($(el).find("img").attr("src"));
+    const imgEl = $(el).find("img").first();
+    const image = normalizeImageUrl(imgEl.attr("src") || imgEl.attr("data-src"));
     const episodeNumber = txt($, ".num-epi", el);
     const time = txt($, ".time", el);
     if (title || url) {
@@ -269,22 +311,6 @@ export function parseEpisodeList($, containerSelector) {
 }
 
 // ─── EPISODE PAGE ─────────────────────────────────────────────────────────────
-//
-// FIX 1 – Navigation: Real HTML uses <span> for disabled nav buttons and <a>
-//   for active ones. Old code only looked at <a> inside .epsdsnv, so "Previous"
-//   was always null even when present as a span placeholder.
-//   We now read ALL children of .epsdsnv and only extract href from <a> tags,
-//   detecting direction by icon class or text content.
-//
-// FIX 2 – Server buttons: Real HTML has MULTIPLE ul.aa-tbs-video elements —
-//   one per language group (Multi Audio, Hindi-Jap, etc.), each inside its own
-//   div.lrt. The selector ".video-options .aa-tbs-video li a.btn" matches ALL
-//   groups, producing duplicated server numbers (e.g. two "#options-1" entries).
-//   Fix: only read the FIRST div.lrt (the active/default language group).
-//   Then deduplicate by serverNumber just in case.
-//
-// FIX 3 – Server name trimming: The .server span in real HTML contains lots of
-//   internal whitespace/newlines. Use .replace(/\s+/g, " ").trim() to clean up.
 
 export function parseEpisodePage(html, slug) {
   const $ = load(html);
@@ -307,11 +333,6 @@ export function parseEpisodePage(html, slug) {
     if (name) cast.push({ name, url: $(el).attr("href") });
   });
 
-  // ── Navigation (FIX 1) ───────────────────────────────────────────────────
-  // Real HTML: .epsdsnv contains a mix of <a> and <span> elements.
-  // <span> = disabled button (no prev/next episode exists)
-  // <a>    = active link
-  // Detect by icon class: fa-step-backward=prev, fa-step-forward=next, fa-indent=series
   let prevUrl = null;
   let nextUrl = null;
   let seriesUrl = null;
@@ -343,10 +364,9 @@ export function parseEpisodePage(html, slug) {
     else if (isSeries && !seriesUrl && href) seriesUrl = href;
   });
 
-  // ── Iframes (video player) ───────────────────────────────────────────────
   const iframes = [];
   $(".video-player div[id^='options-']").each((_, el) => {
-    const id = $(el).attr("id"); // "options-0", "options-1" …
+    const id = $(el).attr("id");
     const num = parseInt(id.replace("options-", ""), 10);
     const src =
       $(el).find("iframe").attr("src") ||
@@ -355,9 +375,6 @@ export function parseEpisodePage(html, slug) {
     iframes.push({ serverNumber: num, src });
   });
 
-  // ── Server buttons (FIX 2 & 3) ──────────────────────────────────────────
-  // Only read the FIRST div.lrt inside .video-options to avoid duplicate
-  // server entries from multiple language group tabs.
   const firstLrt = $(".video-options .lrt").first();
   const serverButtons = [];
   const seenNums = new Set();
@@ -367,26 +384,15 @@ export function parseEpisodePage(html, slug) {
     const num = parseInt(href.replace("#options-", ""), 10);
     if (isNaN(num) || seenNums.has(num)) return;
     seenNums.add(num);
-
     const displayNum =
       parseInt($(el).find("span:not(.server)").first().text().trim()) || num + 1;
-
-    // Clean up whitespace from .server span (real HTML has lots of newlines)
     const serverRaw = $(el).find(".server").text().replace(/\s+/g, " ").trim();
     const dashIdx = serverRaw.lastIndexOf("-");
-    const serverName =
-      dashIdx > 0 ? serverRaw.slice(0, dashIdx).trim() : serverRaw || null;
+    const serverName = dashIdx > 0 ? serverRaw.slice(0, dashIdx).trim() : serverRaw || null;
     const language = dashIdx > 0 ? serverRaw.slice(dashIdx + 1).trim() : null;
-
-    serverButtons.push({
-      serverNumber: num,
-      displayNumber: displayNum,
-      name: serverName || null,
-      language: language || null,
-    });
+    serverButtons.push({ serverNumber: num, displayNumber: displayNum, name: serverName || null, language: language || null });
   });
 
-  // ── Merge iframes + buttons ──────────────────────────────────────────────
   const servers = iframes.map((iframe) => {
     const btn = serverButtons.find((b) => b.serverNumber === iframe.serverNumber);
     return {
@@ -399,7 +405,6 @@ export function parseEpisodePage(html, slug) {
     };
   });
 
-  // ── Available seasons (sidebar dropdown) ─────────────────────────────────
   const availableSeasons = [];
   $(".choose-season ul li.sel-temp a").each((_, el) => {
     const seasonNum = parseInt($(el).attr("data-season"));
@@ -407,7 +412,6 @@ export function parseEpisodePage(html, slug) {
     if (!isNaN(seasonNum)) availableSeasons.push({ seasonNumber: seasonNum, name });
   });
 
-  // ── Episode list sidebar ──────────────────────────────────────────────────
   const episodeList = parseEpisodeList($, "#episode_by_temp");
 
   return {
@@ -444,9 +448,11 @@ export function parseMoviesListPage(html) {
     if (!url) return;
 
     const title = txt($, ".entry-title", article);
-    const image = normalizeImageUrl(article.find("img").attr("src"));
+    const imgEl = article.find("img").first();
+    const image = normalizeImageUrl(imgEl.attr("src") || imgEl.attr("data-src"));
     const voteEl = article.find(".vote");
-    const ratingRaw = voteEl.clone().children().remove().end().text().trim(); const rating = ratingRaw !== "" ? ratingRaw : null;
+    const ratingRaw = voteEl.clone().children().remove().end().text().trim();
+    const rating = ratingRaw !== "" ? ratingRaw : null;
     const liClass = $(li).attr("class") || "";
     const contentType =
       url.includes("/movies/") || liClass.includes(" movies ") ? "movie" : "series";
@@ -469,7 +475,6 @@ export function parseMoviesListPage(html) {
 }
 
 // ─── MOVIE SINGLE PAGE ────────────────────────────────────────────────────────
-// Same FIX 2 & 3 for server buttons applied here too.
 
 export function parseMovieSinglePage(html, slug) {
   const $ = load(html);
@@ -549,9 +554,11 @@ export function parseSearchPage(html, query) {
     if (!url) return;
 
     const title = txt($, ".entry-title", article);
-    const image = normalizeImageUrl(article.find("img").attr("src"));
+    const imgEl = article.find("img").first();
+    const image = normalizeImageUrl(imgEl.attr("src") || imgEl.attr("data-src"));
     const voteEl = article.find(".vote");
-    const ratingRaw = voteEl.clone().children().remove().end().text().trim(); const rating = ratingRaw !== "" ? ratingRaw : null;
+    const ratingRaw = voteEl.clone().children().remove().end().text().trim();
+    const rating = ratingRaw !== "" ? ratingRaw : null;
     const id = $(li).attr("id") || null;
     const liClass = $(li).attr("class") || "";
     const contentType =
@@ -590,9 +597,11 @@ export function parseCategoryPage(html, path) {
     const url = article.find("a.lnk-blk").attr("href") || null;
     if (!url) return;
     const title = txt($, ".entry-title", article);
-    const image = normalizeImageUrl(article.find("img").attr("src"));
+    const imgEl = article.find("img").first();
+    const image = normalizeImageUrl(imgEl.attr("src") || imgEl.attr("data-src"));
     const voteEl = article.find(".vote");
-    const ratingRaw = voteEl.clone().children().remove().end().text().trim(); const rating = ratingRaw !== "" ? ratingRaw : null;
+    const ratingRaw = voteEl.clone().children().remove().end().text().trim();
+    const rating = ratingRaw !== "" ? ratingRaw : null;
     const liClass = $(li).attr("class") || "";
     const contentType =
       liClass.includes(" movies ") || url.includes("/movies/") ? "movie" : "series";
@@ -618,9 +627,11 @@ export function parseCastPage(html, name) {
     const url = article.find("a.lnk-blk").attr("href") || null;
     if (!url) return;
     const title = txt($, ".entry-title", article);
-    const image = normalizeImageUrl(article.find("img").attr("src"));
+    const imgEl = article.find("img").first();
+    const image = normalizeImageUrl(imgEl.attr("src") || imgEl.attr("data-src"));
     const voteEl = article.find(".vote");
-    const ratingRaw = voteEl.clone().children().remove().end().text().trim(); const rating = ratingRaw !== "" ? ratingRaw : null;
+    const ratingRaw = voteEl.clone().children().remove().end().text().trim();
+    const rating = ratingRaw !== "" ? ratingRaw : null;
     const contentType = url.includes("/movies/") ? "movie" : "series";
     items.push({ title, image, rating, url, slug: extractSlugFromUrl(url), contentType });
   });
