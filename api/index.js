@@ -1,544 +1,203 @@
+// ============================================================
+// api/index.js
+// Main entry point for the ToonStream API.
+// Defines all routes and delegates to the provider system.
+// Works locally (via @hono/node-server) and on Vercel.
+// ============================================================
+
 import { Hono } from "hono";
-import { cors } from "hono/cors";
-import { getProvider, getProviderName } from "../core/providerManager.js";
+import { serve } from "@hono/node-server";
+import config from "../core/config.js";
+import { getProvider, getProviderList } from "../core/providerManager.js";
+import { cacheSize } from "../utils/cache.js";
 
-const app = new Hono({ strict: false });
+const app = new Hono();
 
-// ─── CORS ────────────────────────────────────────────────────────────────────
+// Track server start time for uptime calculation
+const startedAt = Date.now();
 
-app.use("*", cors({ origin: "*", allowMethods: ["GET", "OPTIONS"] }));
-
-// ─── METHOD GUARD ────────────────────────────────────────────────────────────
-
+// ─── CORS Middleware ─────────────────────────────────────────
 app.use("*", async (c, next) => {
-  if (c.req.method !== "GET" && c.req.method !== "OPTIONS") {
-    return c.json(
-      { success: false, provider: getProviderName(), message: "Method Not Allowed. Use GET." },
-      405
-    );
-  }
   await next();
+  c.header("Access-Control-Allow-Origin", "*");
+  c.header("Access-Control-Allow-Methods", "GET, OPTIONS");
+  c.header("Access-Control-Allow-Headers", "Content-Type");
 });
 
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
+// Handle preflight
+app.options("*", (c) => c.text("OK", 200));
 
-function ok(c, results, extra = {}) {
-  return c.json({ success: true, provider: getProviderName(), ...extra, results });
+// ─── Helpers ─────────────────────────────────────────────────
+
+/** Standard success response */
+function ok(c, data, provider = config.defaultProvider) {
+  return c.json({ success: true, provider, results: data });
 }
 
+/** Standard error response */
 function err(c, message, status = 500) {
-  return c.json({ success: false, provider: getProviderName(), message }, status);
+  return c.json({ success: false, message }, status);
 }
 
-function parseSeasonParam(param, available) {
-  if (!param || param === "all") return available;
-  if (param.includes("-")) {
-    const [start, end] = param.split("-").map(Number);
-    return available.filter((n) => n >= start && n <= end);
+/** Safely execute a provider function and handle errors */
+async function runProvider(c, fn, providerName) {
+  try {
+    const result = await fn();
+    return ok(c, result, providerName);
+  } catch (e) {
+    console.error(`[API] Provider error:`, e.message);
+    return err(c, e.message || "Provider error");
   }
-  if (param.includes(",")) {
-    const nums = param.split(",").map(Number);
-    return available.filter((n) => nums.includes(n));
-  }
-  const num = parseInt(param);
-  return isNaN(num) ? available : [num];
 }
 
-function parseServerParam(param, servers) {
-  if (!param || param === "all") return null;
-  if (param.includes("-") && !isNaN(param.split("-")[0])) {
-    const [start, end] = param.split("-").map(Number);
-    const range = [];
-    for (let i = start; i <= end; i++) range.push(i);
-    return range;
-  }
-  if (param.includes(",")) {
-    const parts = param.split(",");
-    if (!isNaN(parts[0])) return parts.map(Number);
-    if (servers) {
-      return servers
-        .filter((s) => parts.some((p) => s.name?.toLowerCase().includes(p.toLowerCase())))
-        .map((s) => s.serverNumber);
-    }
-  }
-  if (!isNaN(parseInt(param))) return [parseInt(param)];
-  if (servers) {
-    return servers
-      .filter((s) => s.name?.toLowerCase().includes(param.toLowerCase()))
-      .map((s) => s.serverNumber);
-  }
-  return null;
-}
+// ─── Routes ──────────────────────────────────────────────────
 
-// ─── ROOT ────────────────────────────────────────────────────────────────────
-
+/**
+ * GET /
+ * Health check — returns API status, version, providers, uptime
+ */
 app.get("/", (c) => {
+  const uptimeSeconds = Math.floor((Date.now() - startedAt) / 1000);
+
   return c.json({
     success: true,
-    provider: getProviderName(),
-    results: {
-      name: "ToonStream API",
-      version: "1.0.0",
-      description: "Anime & cartoon scraping API for ToonStream",
-      baseUrl: "https://toonstream.vip",
-      endpoints: {
-        home: "GET /home",
-        health: "GET /health",
-        test: "GET /test?url=<encoded-url>",
-        series: "GET /series/:slug",
-        seriesWithSeasons: "GET /series/:slug?seasons=1,2&src=true&server=all",
-        episode: "GET /episode/:slug",
-        episodeWithServers: "GET /episode/:slug?server=0,1,2",
-        movies: "GET /movies",
-        moviePage: "GET /movies/page/:page",
-        movieSingle: "GET /movies/:slug",
-        search: "GET /search/:query",
-        searchQuery: "GET /search?q=naruto",
-        category: "GET /category/:path",
-        categoryPaged: "GET /category/:path/page/:page",
-        cast: "GET /cast/:name",
-        letter: "GET /letter/:letter",
-      },
-    },
+    name: config.name,
+    version: config.version,
+    status: "ok",
+    uptime: `${uptimeSeconds}s`,
+    defaultProvider: config.defaultProvider,
+    providers: getProviderList(),
+    cacheEntries: cacheSize(),
+    endpoints: [
+      "GET /",
+      "GET /search?q=<query>",
+      "GET /anime/:id",
+      "GET /movie/:id",
+      "GET /episode/:id",
+      "GET /recent",
+      "GET /recent/movies",
+      "GET /trending",
+    ],
   });
 });
 
-// ─── HEALTH ──────────────────────────────────────────────────────────────────
-
-app.get("/health", (c) => {
-  return c.json({
-    success: true,
-    provider: getProviderName(),
-    results: {
-      status: "ok",
-      uptime: process.uptime(),
-      timestamp: new Date().toISOString(),
-    },
-  });
-});
-
-// ─── TEST (fetch proxy — returns raw HTML of any URL) ─────────────────────────
-//
-// FIX: /api/test was a standalone Vercel function (api/test.js) using the raw
-// Node.js (req, res) handler style. That file is NOT auto-registered as a Hono
-// route, so hitting /test returned 404.
-//
-// Solution: register the same logic here as a proper Hono GET /test route.
-// The original test.js file can remain for direct Vercel function access at
-// /api/test, but this route makes it reachable through the Hono app as /test.
-//
-// Usage: GET /test?url=https%3A%2F%2Ftoonstream.vip%2Fhome%2F
-// Returns the raw HTML of the target URL as text/plain.
-
-app.get("/test", async (c) => {
-  const url = c.req.query("url");
-
-  if (!url) {
-    return c.text("Missing ?url= parameter", 400);
-  }
-
-  let targetUrl;
-  try {
-    targetUrl = new URL(url);
-  } catch {
-    return c.text("Invalid URL — must be a fully qualified URL (https://...)", 400);
-  }
-
-  try {
-    const response = await fetch(targetUrl.toString(), {
-      method: "GET",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        Referer: targetUrl.origin,
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-
-    const html = await response.text();
-
-    // Return raw HTML as plain text (same as the original test.js)
-    c.header("Content-Type", "text/plain; charset=utf-8");
-    c.header("X-Content-Type-Options", "nosniff");
-    return c.body(html, response.status);
-  } catch (error) {
-    c.header("Content-Type", "text/plain; charset=utf-8");
-    return c.text(`Scraper Error\n\n${error.message}`, 500);
-  }
-});
-
-// ─── HOME ────────────────────────────────────────────────────────────────────
-
-app.get("/home", async (c) => {
-  const s = c.req.query("s");
-  if (s) {
-    try {
-      const p = getProvider();
-      const data = await p.searchAnime(s);
-      return ok(c, data, { stats: data.stats });
-    } catch (e) {
-      return err(c, e.message, e.status || 500);
-    }
-  }
-  try {
-    const p = getProvider();
-    const data = await p.getHome();
-    return ok(c, data);
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-// ─── SERIES ──────────────────────────────────────────────────────────────────
-
-app.get("/series", async (c) => {
-  try {
-    const slug = c.req.query("slug");
-    if (!slug) return err(c, "Missing ?slug= parameter", 400);
-    const p = getProvider();
-    const data = await p.getSeriesInfo(slug);
-    const stats = {
-      totalSeasons: data.totalSeasons,
-      totalEpisodes: data.totalEpisodes,
-      availableSeasons: data.availableSeasons?.length,
-    };
-    return ok(c, data, { stats });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/series/:slug", async (c) => {
-  try {
-    const { slug } = c.req.param();
-    const p = getProvider();
-    const data = await p.getSeriesInfo(slug);
-
-    const seasonsParam = c.req.query("seasons");
-    const includeSrc = c.req.query("src") === "true";
-    const serverParam = c.req.query("server");
-
-    let seasons = [];
-    if (seasonsParam && data.availableSeasons?.length) {
-      const requestedSeasonNums = parseSeasonParam(
-        seasonsParam,
-        data.availableSeasons.map((s) => s.seasonNumber)
-      );
-      seasons = await Promise.all(
-        requestedSeasonNums.map(async (seasonNum) => {
-          const seasonInfo = data.availableSeasons.find((s) => s.seasonNumber === seasonNum);
-          let episodes = [];
-          if (seasonInfo?.postId) {
-            episodes = await p.getSeasonEpisodes(seasonInfo.postId, seasonNum);
-          }
-          if (includeSrc && episodes.length > 0) {
-            const serverNums = parseServerParam(serverParam, null);
-            episodes = await Promise.all(
-              episodes.map(async (ep) => {
-                if (!ep.slug) return ep;
-                try {
-                  const epData = await p.getEpisodeInfo(ep.slug);
-                  let servers = epData.servers || [];
-                  if (serverNums !== null) {
-                    servers = servers.filter((s) => serverNums.includes(s.serverNumber));
-                  }
-                  return { ...ep, servers };
-                } catch {
-                  return ep;
-                }
-              })
-            );
-          }
-          return {
-            seasonNumber: seasonNum,
-            name: seasonInfo?.name || `Season ${seasonNum}`,
-            episodes,
-          };
-        })
-      );
-    } else {
-      seasons = [{ seasonNumber: 1, name: "Season 1", episodes: data.episodes || [] }];
-    }
-
-    const result = { ...data, seasons };
-    delete result.episodes;
-
-    const stats = {
-      totalSeasons: data.totalSeasons,
-      requestedSeasons: seasons.length,
-      fetchedEpisodes: seasons.reduce((acc, s) => acc + (s.episodes?.length || 0), 0),
-      includesServerSources: includeSrc,
-    };
-
-    return ok(c, result, { stats });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-// ─── EPISODE ─────────────────────────────────────────────────────────────────
-
-app.get("/episode", async (c) => {
-  try {
-    const slug = c.req.query("slug");
-    if (!slug) return err(c, "Missing ?slug= parameter", 400);
-    const serverParam = c.req.query("server");
-    const p = getProvider();
-    const data = await p.getEpisodeInfo(slug);
-    let servers = data.servers || [];
-    if (serverParam && serverParam !== "all") {
-      const serverNums = parseServerParam(serverParam, servers);
-      if (serverNums !== null) servers = servers.filter((s) => serverNums.includes(s.serverNumber));
-    }
-    const result = { ...data, servers };
-    const stats = {
-      totalServersAvailable: data.servers?.length || 0,
-      serversReturned: servers.length,
-    };
-    return ok(c, result, { stats });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/episode/:slug", async (c) => {
-  try {
-    const { slug } = c.req.param();
-    const serverParam = c.req.query("server");
-    const p = getProvider();
-    const data = await p.getEpisodeInfo(slug);
-    let servers = data.servers || [];
-    if (serverParam && serverParam !== "all") {
-      const serverNums = parseServerParam(serverParam, servers);
-      if (serverNums !== null) servers = servers.filter((s) => serverNums.includes(s.serverNumber));
-    }
-    const result = { ...data, servers };
-    const stats = {
-      totalServersAvailable: data.servers?.length || 0,
-      serversReturned: servers.length,
-    };
-    return ok(c, result, { stats });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-// ─── MOVIES ──────────────────────────────────────────────────────────────────
-
-app.get("/movies", async (c) => {
-  try {
-    const page = parseInt(c.req.query("page")) || 1;
-    const p = getProvider();
-    const data = await p.getMoviesList(page);
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/movies/page/:page", async (c) => {
-  try {
-    const page = parseInt(c.req.param("page")) || 1;
-    const p = getProvider();
-    const data = await p.getMoviesList(page);
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/movies/:slug", async (c) => {
-  try {
-    const { slug } = c.req.param();
-    const p = getProvider();
-    if (!isNaN(parseInt(slug))) {
-      const data = await p.getMoviesList(parseInt(slug));
-      return ok(c, data, { pagination: data.pagination });
-    }
-    const data = await p.getMovieSingle(slug);
-    return ok(c, data);
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-// ─── SEARCH ──────────────────────────────────────────────────────────────────
-
+/**
+ * GET /search?q=naruto
+ * Search anime & series by title
+ */
 app.get("/search", async (c) => {
-  try {
-    const query = c.req.query("q") || c.req.query("s") || c.req.query("query") || "";
-    if (!query) return err(c, "Missing query parameter (q or s)", 400);
-    const page = parseInt(c.req.query("page")) || 1;
-    const p = getProvider();
-    const data = await p.searchAnime(query, page);
-    return ok(c, data, { stats: data.stats });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
+  const query = c.req.query("q");
+
+  if (!query || !query.trim()) {
+    return err(c, "Query parameter 'q' is required", 400);
   }
+
+  const provider = await getProvider();
+  return runProvider(c, () => provider.search(query), config.defaultProvider);
 });
 
-app.get("/search/:query", async (c) => {
-  try {
-    const query = c.req.param("query");
-    const page = parseInt(c.req.query("page")) || 1;
-    const p = getProvider();
-    const data = await p.searchAnime(query, page);
-    return ok(c, data, { stats: data.stats });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
+/**
+ * GET /anime/:id
+ * Full series/anime details by slug.
+ * e.g. /anime/jujutsu-kaisen
+ */
+app.get("/anime/:id", async (c) => {
+  const id = c.req.param("id");
 
-// ─── CATEGORY ────────────────────────────────────────────────────────────────
+  if (!id) return err(c, "Anime ID (slug) is required", 400);
 
-app.get("/category/:path{.+}", async (c) => {
-  try {
-    let path = c.req.param("path");
-    let page = parseInt(c.req.query("page")) || 1;
-    const pageMatch = path.match(/^(.+)\/page\/(\d+)\/?$/);
-    if (pageMatch) {
-      path = pageMatch[1];
-      page = parseInt(pageMatch[2]);
-    }
-    const p = getProvider();
-    const data = await p.getCategoryPage(path, page);
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-// ─── CAST ────────────────────────────────────────────────────────────────────
-
-app.get("/cast/:name/page/:page", async (c) => {
-  try {
-    const { name, page } = c.req.param();
-    const p = getProvider();
-    const data = await p.getCastPage(name, parseInt(page));
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/cast/:name", async (c) => {
-  try {
-    const { name } = c.req.param();
-    const page = parseInt(c.req.query("page")) || 1;
-    const p = getProvider();
-    const data = await p.getCastPage(name, page);
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-// ─── HOME ALIASES ────────────────────────────────────────────────────────────
-
-app.get("/home/cast_tv/:name", async (c) => {
-  try {
-    const { name } = c.req.param();
-    const page = parseInt(c.req.query("page")) || 1;
-    const p = getProvider();
-    const data = await p.getCastPage(name, page);
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/home/cast/:name/page/:page", async (c) => {
-  try {
-    const { name, page } = c.req.param();
-    const p = getProvider();
-    const data = await p.getCastPage(name, parseInt(page));
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/home/letter/:letter/page/:page", async (c) => {
-  try {
-    const { letter, page } = c.req.param();
-    const p = getProvider();
-    const data = await p.getLetterPage(letter, parseInt(page));
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/home/letter/:letter", async (c) => {
-  try {
-    const { letter } = c.req.param();
-    const page = parseInt(c.req.query("page")) || 1;
-    const p = getProvider();
-    const data = await p.getLetterPage(letter, page);
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/home/search/:query", async (c) => {
-  try {
-    const { query } = c.req.param();
-    const page = parseInt(c.req.query("page")) || 1;
-    const p = getProvider();
-    const data = await p.searchAnime(query, page);
-    return ok(c, data, { stats: data.stats });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-// ─── LETTER ──────────────────────────────────────────────────────────────────
-
-app.get("/letter/:letter/page/:page", async (c) => {
-  try {
-    const { letter, page } = c.req.param();
-    const p = getProvider();
-    const data = await p.getLetterPage(letter, parseInt(page));
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-app.get("/letter/:letter", async (c) => {
-  try {
-    const { letter } = c.req.param();
-    const page = parseInt(c.req.query("page")) || 1;
-    const p = getProvider();
-    const data = await p.getLetterPage(letter, page);
-    return ok(c, data, { pagination: data.pagination });
-  } catch (e) {
-    return err(c, e.message, e.status || 500);
-  }
-});
-
-// ─── 404 & ERROR ─────────────────────────────────────────────────────────────
-
-app.notFound((c) => {
-  return c.json(
-    { success: false, provider: getProviderName(), message: "Endpoint not found", statusCode: 404 },
-    404
+  const provider = await getProvider();
+  return runProvider(
+    c,
+    () => provider.getAnimeDetails(id),
+    config.defaultProvider
   );
 });
 
-app.onError((error, c) => {
-  console.error("[ERROR]", error.message, error.stack);
-  return c.json(
-    { success: false, provider: getProviderName(), message: error.message || "Internal Server Error" },
-    error.status || 500
+/**
+ * GET /movie/:id
+ * Movie details by slug.
+ * e.g. /movie/jujutsu-kaisen-0
+ */
+app.get("/movie/:id", async (c) => {
+  const id = c.req.param("id");
+
+  if (!id) return err(c, "Movie ID (slug) is required", 400);
+
+  const provider = await getProvider();
+  return runProvider(
+    c,
+    () => provider.getMovieDetails(id),
+    config.defaultProvider
   );
 });
 
-// ─── EXPORT FOR VERCEL ───────────────────────────────────────────────────────
+/**
+ * GET /episode/:id
+ * Episode streaming sources by slug.
+ * e.g. /episode/jujutsu-kaisen-1x1
+ */
+app.get("/episode/:id", async (c) => {
+  const id = c.req.param("id");
 
-import { handle } from "@hono/node-server/vercel";
+  if (!id) return err(c, "Episode ID (slug) is required", 400);
 
-export default handle(app);
+  const provider = await getProvider();
+  return runProvider(
+    c,
+    () => provider.getEpisodeSources(id),
+    config.defaultProvider
+  );
+});
+
+/**
+ * GET /recent
+ * Latest updated series
+ */
+app.get("/recent", async (c) => {
+  const provider = await getProvider();
+  return runProvider(c, () => provider.getRecent(), config.defaultProvider);
+});
+
+/**
+ * GET /recent/movies
+ * Latest updated movies
+ */
+app.get("/recent/movies", async (c) => {
+  const provider = await getProvider();
+  return runProvider(
+    c,
+    () => provider.getRecentMovies(),
+    config.defaultProvider
+  );
+});
+
+/**
+ * GET /trending
+ * Trending anime from ToonStream's featured sections
+ */
+app.get("/trending", async (c) => {
+  const provider = await getProvider();
+  return runProvider(c, () => provider.getTrending(), config.defaultProvider);
+});
+
+// ─── 404 Catch-All ───────────────────────────────────────────
+app.notFound((c) => err(c, "Route not found", 404));
+
+// ─── Global Error Handler ────────────────────────────────────
+app.onError((e, c) => {
+  console.error("[API] Unhandled error:", e.message);
+  return err(c, "Internal server error", 500);
+});
+
+// ─── Server Start (local dev) ─────────────────────────────────
+// On Vercel, the export below is used instead.
+// Locally, we start a plain Node.js HTTP server.
+if (process.env.VERCEL !== "1") {
+  const port = parseInt(process.env.PORT || "3000", 10);
+  serve({ fetch: app.fetch, port });
+  console.log(`[ToonStream API] Running on http://localhost:${port}`);
+}
+
+// ─── Vercel Serverless Export ─────────────────────────────────
+export default app.fetch;
