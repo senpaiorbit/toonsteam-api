@@ -1,9 +1,6 @@
 // ============================================================
 // providers/toonstream/index.js
-// Public interface for the ToonStream provider.
-// All API routes import from here — never from sub-files directly.
 // ============================================================
-
 export { search } from "./search.js";
 
 export {
@@ -13,9 +10,9 @@ export {
   getRecent,
   getTrending,
   getRecentMovies,
+  getHomePage, // NEW
 } from "./anime.js";
 
-// Provider metadata used by the health endpoint
 export const PROVIDER_INFO = {
   name: "toonstream",
   baseUrl: "https://toonstream.vip",
@@ -26,6 +23,8 @@ export const PROVIDER_INFO = {
     "GET /movie/:id",
     "GET /episode/:id",
     "GET /recent",
+    "GET /recent/movies",
     "GET /trending",
+    "GET /home",
   ],
 };
