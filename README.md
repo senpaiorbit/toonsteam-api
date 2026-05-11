@@ -1,59 +1,52 @@
 # ToonStream API
 
-<p align="center">
-  <img src="https://toonstream.vip/wp-content/uploads/2024/01/TOONSTREAM.png" alt="ToonStream" width="300" />
-</p>
-
-<p align="center">
-  A fast, provider-based anime & cartoon scraping REST API built with Node.js + Hono, optimized for Vercel serverless deployment.
-</p>
+A lightweight, modular **anime scraping REST API** built with **Node.js + Hono**, deployed on **Vercel serverless**. Scrapes [ToonStream](https://toonstream.vip) — a WordPress-based anime streaming site — and returns clean, structured JSON.
 
 ---
 
 ## ✨ Features
 
-- **Provider-based architecture** — easy to add new sources
-- **Full homepage scraping** — latest episodes, series, languages
-- **Series details** — metadata, seasons, cast, categories
-- **Season episode fetching** — via WordPress AJAX, flexible season selection
-- **Episode details** — streaming servers with iframe sources
-- **Movie support** — listings and individual movie detail pages
-- **Search** — full-text search across all content
-- **Categories** — browse by genre, network, language
-- **Cast pages** — content filtered by actor/voice actor
-- **Alphabetical browsing** — A–Z letter navigation
-- **In-memory cache** — tiered TTL per content type
-- **CORS enabled** — ready for frontend integration
-- **Cloudflare-friendly headers** — browser-like request fingerprinting
+- **Search** — full-text search across all anime, series, and movies
+- **Series/Anime Details** — title, description, genres, cast, seasons, episode list
+- **Movie Details** — metadata, genres, streaming server sources
+- **Episode Sources** — all streaming servers with embed URLs and language labels
+- **Recent** — latest updated series and movies
+- **Trending** — featured content from ToonStream's homepage
+- **Zero-dependency cache** — fast in-memory TTL cache (no Redis needed)
+- **Modular provider system** — drop in `animesalt`, `hianime`, etc. with zero refactoring
+- **Vercel-optimised** — cold starts under 500ms, memory-efficient
 
 ---
 
-## 📁 Project Structure
+## 🗂 Project Structure
 
 ```
 toonstream-api/
+│
 ├── api/
-│   └── index.js              # Hono app entry + all route mounting
+│   └── index.js              # Hono app — all routes live here
+│
 ├── core/
-│   ├── config.js             # Env config
-│   └── providerManager.js    # Provider loader & switcher
+│   ├── config.js             # Central config (timeout, cache TTL, providers)
+│   └── providerManager.js    # Dynamic provider loader with fallback
+│
 ├── constants/
-│   └── baseurl.js            # Base URLs per provider
+│   └── baseurl.js            # Base URLs for all providers
+│
 ├── providers/
 │   └── toonstream/
-│       ├── index.js          # Clean export of all provider functions
-│       ├── parser.js         # Cheerio selectors only — no HTTP
-│       ├── anime.js          # Series, episode, movie, category logic
-│       └── search.js         # Search & letter browse logic
-├── routes/
-│   ├── anime.js              # Series / episode / movie / category routes
-│   └── search.js             # Search routes
+│       ├── index.js          # Public exports (what routes call)
+│       ├── parser.js         # Cheerio parsing helpers
+│       ├── anime.js          # Details, episodes, trending, recent
+│       └── search.js         # Search scraping
+│
 ├── utils/
-│   ├── http.js               # Axios wrapper with retry + timeout
-│   ├── request.js            # Browser-like headers + user agents
-│   ├── dom.js                # Reusable cheerio DOM helpers
-│   └── cache.js              # In-memory Map-based cache
-├── .env
+│   ├── http.js               # Axios wrapper (timeout + browser headers)
+│   ├── dom.js                # Cheerio helper functions
+│   ├── request.js            # Browser-like header builder
+│   └── cache.js              # In-memory TTL cache
+│
+├── .env                      # Environment variables
 ├── package.json
 ├── vercel.json
 ├── jsconfig.json
@@ -65,129 +58,159 @@ toonstream-api/
 ## 🛠 Installation
 
 ```bash
-git clone https://github.com/yourusername/toonstream-api.git
+# 1. Clone the repo
+git clone https://github.com/yourname/toonstream-api.git
 cd toonstream-api
-npm install
-```
 
-Create a `.env` file:
-```env
-PORT=3000
-PROVIDER=toonstream
+# 2. Install dependencies
+npm install
+
+# 3. Copy and configure env
+cp .env .env.local
 ```
 
 ---
 
-## 🚀 Local Development
+## 💻 Local Development
 
 ```bash
 npm run dev
 ```
 
-API will be available at `http://localhost:3000`
+The API will start at `http://localhost:3000`.
 
 ---
 
-## ☁️ Vercel Deployment
+## 🚀 Vercel Deployment
 
 ```bash
+# Install Vercel CLI
 npm install -g vercel
+
+# Login
 vercel login
+
+# Deploy (first time — follow the prompts)
+vercel
+
+# Deploy to production
 vercel --prod
 ```
 
-Your API will be live at: `https://your-project.vercel.app`
+Vercel will automatically route all requests to `api/index.js` via `vercel.json`.
+
+---
+
+## ⚙️ Environment Variables
+
+| Variable               | Default                     | Description                             |
+|------------------------|-----------------------------|-----------------------------------------|
+| `TOONSTREAM_BASE_URL`  | `https://toonstream.vip`    | ToonStream domain (update if it moves)  |
+| `DEFAULT_PROVIDER`     | `toonstream`                | Active provider                         |
+| `REQUEST_TIMEOUT`      | `15000`                     | Axios timeout in milliseconds           |
+| `CACHE_TTL`            | `300`                       | Cache TTL in seconds                    |
+
+Set these in Vercel's dashboard under **Project → Settings → Environment Variables**.
 
 ---
 
 ## 📡 API Endpoints
 
-### Root & Health
-
-| Method | Endpoint  | Description            |
-|--------|-----------|------------------------|
-| GET    | `/`       | API info & endpoint list |
-| GET    | `/health` | Health check           |
-
----
-
-### Homepage
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/home` | Latest episodes, series, languages |
-| GET | `/home?s=naruto` | Search via homepage shortcut |
+### `GET /`
+Health check and API info.
 
 **Response:**
 ```json
 {
   "success": true,
-  "provider": "toonstream",
-  "results": {
-    "latestEpisodes": [...],
-    "latestSeries": [...],
-    "languages": [...],
-    "featured": [...]
-  }
+  "name": "toonstream-api",
+  "version": "1.0.0",
+  "status": "ok",
+  "uptime": "42s",
+  "defaultProvider": "toonstream",
+  "providers": ["toonstream"],
+  "cacheEntries": 5,
+  "endpoints": [
+    "GET /",
+    "GET /search?q=<query>",
+    "GET /anime/:id",
+    "GET /movie/:id",
+    "GET /episode/:id",
+    "GET /recent",
+    "GET /recent/movies",
+    "GET /trending"
+  ]
 }
 ```
 
 ---
 
-### Series
+### `GET /search?q=naruto`
+Search for anime, series, or movies.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/series/:slug` | Series info + season 1 episodes |
-| GET | `/series/:slug?seasons=all` | All seasons |
-| GET | `/series/:slug?seasons=1,2,3` | Specific seasons |
-| GET | `/series/:slug?seasons=2-4` | Season range |
-| GET | `/series/:slug?seasons=1&src=true&server=all` | With server sources |
-| GET | `/series?slug=jujutsu-kaisen` | Query param version |
+**Query params:**
+- `q` (required) — search term
 
-**Query Parameters:**
-- `seasons` — `1`, `1,2,3`, `2-4`, `all`
-- `src` — `true` to include iframe server sources per episode
-- `server` — `0,1,2`, `0-4`, `all`, or server names like `x,ruby`
+**Example:** `GET /search?q=jujutsu`
 
 **Response:**
 ```json
 {
   "success": true,
   "provider": "toonstream",
-  "stats": {
-    "totalSeasons": 3,
-    "requestedSeasons": 2,
-    "fetchedEpisodes": 47,
-    "includesServerSources": true
-  },
+  "results": [
+    {
+      "id": "jujutsu-kaisen",
+      "title": "Jujutsu Kaisen",
+      "url": "https://toonstream.vip/series/jujutsu-kaisen/",
+      "image": "https://image.tmdb.org/t/p/w500/dGvJUOS01OrgDntHXGF04tW6oJ5.jpg",
+      "rating": "8.552",
+      "type": "series"
+    }
+  ]
+}
+```
+
+---
+
+### `GET /anime/:id`
+Full details for a series/anime.
+
+**Example:** `GET /anime/jujutsu-kaisen`
+
+**Response:**
+```json
+{
+  "success": true,
+  "provider": "toonstream",
   "results": {
-    "slug": "jujutsu-kaisen",
+    "id": "jujutsu-kaisen",
     "title": "Jujutsu Kaisen",
-    "image": "https://image.tmdb.org/t/p/w185/...",
-    "rating": "8.552",
+    "url": "https://toonstream.vip/series/jujutsu-kaisen/",
+    "image": "https://image.tmdb.org/t/p/w185/dGvJUOS01OrgDntHXGF04tW6oJ5.jpg",
+    "description": "Yuji Itadori is a boy with tremendous physical strength...",
     "year": "2020",
-    "duration": "2",
+    "rating": "8.552",
+    "duration": "2 min.",
+    "views": "290",
     "totalSeasons": 3,
     "totalEpisodes": 59,
-    "categories": [{"name": "Action & Adventure", "url": "..."}],
-    "cast": [{"name": "Junya Enoki", "url": "..."}],
-    "availableSeasons": [{"seasonNumber": 1, "name": "Season 1"}],
+    "genres": ["Action & Adventure", "Animation", "Anime Series"],
     "seasons": [
+      { "season": 1, "label": "Season 1", "postId": "1914" },
+      { "season": 2, "label": "Season 2", "postId": "1914" }
+    ],
+    "cast": [
+      { "label": "Cast", "names": ["Junya Enoki", "Asami Seto"] }
+    ],
+    "episodes": [
       {
-        "seasonNumber": 1,
-        "name": "Season 1",
-        "episodes": [
-          {
-            "title": "Jujutsu Kaisen 1x1",
-            "episodeNumber": "1x1",
-            "image": "https://...",
-            "time": "6 years ago",
-            "url": "https://toonstream.vip/episode/jujutsu-kaisen-1x1/",
-            "slug": "jujutsu-kaisen-1x1",
-            "servers": [...]
-          }
-        ]
+        "id": "jujutsu-kaisen-1x1",
+        "episode": "1x1",
+        "title": "Jujutsu Kaisen 1x1",
+        "url": "https://toonstream.vip/episode/jujutsu-kaisen-1x1/",
+        "thumbnail": "https://image.tmdb.org/t/p/w185/veG3J8KaBudM8omuGi58fYOMDTz.jpg",
+        "aired": "6 years ago"
       }
     ]
   }
@@ -196,211 +219,181 @@ Your API will be live at: `https://your-project.vercel.app`
 
 ---
 
-### Episode
+### `GET /movie/:id`
+Full details for a movie.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/episode/:slug` | Episode info + all servers |
-| GET | `/episode/:slug?server=0,1,2` | Specific servers by number |
-| GET | `/episode/:slug?server=0-4` | Server range |
-| GET | `/episode/:slug?server=x,ruby` | By server name |
-| GET | `/episode?slug=jujutsu-kaisen-1x1` | Query param version |
+**Example:** `GET /movie/jujutsu-kaisen-0`
 
 **Response:**
 ```json
 {
   "success": true,
   "provider": "toonstream",
-  "stats": {
-    "totalServersAvailable": 7,
-    "serversReturned": 3
-  },
   "results": {
-    "slug": "jujutsu-kaisen-1x1",
-    "title": "Jujutsu Kaisen 1x1",
-    "image": "https://...",
+    "id": "jujutsu-kaisen-0",
+    "title": "Jujutsu Kaisen 0",
+    "url": "https://toonstream.vip/movies/jujutsu-kaisen-0/",
+    "image": "https://image.tmdb.org/t/p/w185/23oJaeBh0FDk2mQ2P240PU9Xxfh.jpg",
     "description": "...",
-    "rating": "8.552",
-    "year": "2020",
-    "categories": [...],
-    "cast": [...],
-    "navigation": {
-      "previousEpisode": null,
-      "nextEpisode": "https://toonstream.vip/episode/jujutsu-kaisen-1x2/",
-      "seriesPage": "https://toonstream.vip/series/jujutsu-kaisen/"
-    },
-    "servers": [
+    "year": "2021",
+    "rating": "8.18",
+    "duration": "1h 45m",
+    "genres": ["Action", "Animation", "Anime Movies"],
+    "cast": [],
+    "sources": [
       {
-        "serverNumber": 0,
-        "displayNumber": 1,
-        "name": "X",
-        "language": "Multi Audio",
-        "src": "https://toonstream.vip/?trembed=0&trid=17486&trtype=2",
-        "isActive": true
+        "server": "Play",
+        "language": "Hindi-Eng",
+        "embedUrl": "https://toonstream.vip/?trembed=0&trid=6994&trtype=1",
+        "index": 0
       }
-    ]
+    ],
+    "related": []
   }
 }
 ```
 
 ---
 
-### Movies
+### `GET /episode/:id`
+Streaming sources for an episode.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/movies` | Movies listing (page 1) |
-| GET | `/movies/page/:page` | Movies listing paginated |
-| GET | `/movies/:slug` | Individual movie details |
-
----
-
-### Search
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/search/:query` | Search by path |
-| GET | `/search?q=naruto` | Search by query param |
-| GET | `/search?s=naruto` | Search (alternate param) |
-| GET | `/search/:query?page=2` | Paginated search |
-| GET | `/home/search/:query` | Alternate search URL |
+**Example:** `GET /episode/jujutsu-kaisen-1x1`
 
 **Response:**
 ```json
 {
   "success": true,
   "provider": "toonstream",
-  "stats": {
-    "resultsCount": 8,
-    "seriesCount": 5,
-    "moviesCount": 3
-  },
   "results": {
-    "searchQuery": "naruto",
-    "hasResults": true,
-    "results": [
+    "id": "jujutsu-kaisen-1x1",
+    "title": "Jujutsu Kaisen 1x1",
+    "url": "https://toonstream.vip/episode/jujutsu-kaisen-1x1/",
+    "image": "https://image.tmdb.org/t/p/w185/dGvJUOS01OrgDntHXGF04tW6oJ5.jpg",
+    "year": "2020",
+    "duration": "24min",
+    "rating": "8.552",
+    "genres": ["Action & Adventure", "Animation"],
+    "sources": [
       {
-        "id": "post-1234",
-        "title": "Naruto Shippuden",
-        "image": "https://...",
-        "url": "https://...",
-        "slug": "naruto-shippuden",
-        "rating": "8.5",
-        "contentType": "series",
-        "categories": [...],
-        "tags": [...]
+        "server": "X",
+        "language": "Multi Audio",
+        "embedUrl": "https://toonstream.vip/?trembed=0&trid=9005&trtype=2",
+        "index": 0
+      },
+      {
+        "server": "Short",
+        "language": "Multi Audio",
+        "embedUrl": "https://toonstream.vip/?trembed=1&trid=9005&trtype=2",
+        "index": 1
       }
-    ]
+    ],
+    "navigation": {
+      "prev": null,
+      "next": "https://toonstream.vip/episode/jujutsu-kaisen-1x2/",
+      "seriesUrl": "https://toonstream.vip/series/jujutsu-kaisen/"
+    },
+    "episodes": []
   }
 }
 ```
 
 ---
 
-### Categories
+### `GET /recent`
+Latest updated series.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/category/:path` | Browse category |
-| GET | `/category/:path/page/:page` | Paginated category |
-| GET | `/category/action` | Action genre |
-| GET | `/category/crunchyroll` | Crunchyroll network |
-| GET | `/category/language/hindi-language` | Hindi dubbed |
-| GET | `/category/anime/anime-series` | Anime series |
+### `GET /recent/movies`
+Latest updated movies.
 
-**Common paths:**
-- Networks: `crunchyroll`, `netflix`, `disney`, `cartoon-network`, `jiohostar`
-- Genres: `action`, `comedy`, `drama`, `sci-fi-fantasy`, `romance`, `superhero`
-- Languages: `language/hindi-language`, `language/tamil-language`, `language/japaneses`, `language/english`
+### `GET /trending`
+Featured/trending anime from ToonStream's homepage.
 
----
-
-### Cast
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/cast/:name` | Browse by cast member |
-| GET | `/cast/:name/page/:page` | Paginated cast page |
-| GET | `/home/cast_tv/:name` | Alternate cast URL |
-
-**Example:** `GET /cast/junya-enoki`
-
----
-
-### Alphabetical Browse
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/letter/:letter` | Browse by first letter |
-| GET | `/letter/:letter/page/:page` | Paginated |
-| GET | `/home/letter/:letter` | Alternate letter URL |
-
-**Examples:** `/letter/A`, `/letter/N/page/2`, `/letter/0-9`
-
----
-
-## 📦 Response Format
-
-All responses follow this consistent structure:
-
-**Success:**
+All three return:
 ```json
 {
   "success": true,
   "provider": "toonstream",
-  "results": { ... },
-  "stats": { ... }
+  "results": [
+    {
+      "id": "jujutsu-kaisen",
+      "title": "Jujutsu Kaisen",
+      "url": "https://toonstream.vip/series/jujutsu-kaisen/",
+      "image": "https://image.tmdb.org/t/p/w500/dGvJUOS01OrgDntHXGF04tW6oJ5.jpg",
+      "rating": "8.552",
+      "type": "series"
+    }
+  ]
 }
 ```
 
-**Error:**
+---
+
+### Error Response Format
+
+All errors return:
 ```json
 {
   "success": false,
-  "provider": "toonstream",
-  "message": "Error description",
-  "statusCode": 404
+  "message": "Description of the error"
 }
 ```
 
 ---
 
-## ⚡ Cache TTL
+## 🏗 Provider Architecture
 
-| Content Type | Cache Duration |
-|---|---|
-| Home / Search | 5 minutes |
-| Series / Episode | 30 minutes |
-| Stream servers | 1 hour |
-| Category / Cast | 10 minutes |
+Each provider is a self-contained folder under `providers/`:
+
+```
+providers/
+└── toonstream/
+    ├── index.js    ← Public exports (getAnimeDetails, search, etc.)
+    ├── parser.js   ← Cheerio DOM parsers (reusable across scrapers)
+    ├── anime.js    ← Details + episode + trending + recent logic
+    └── search.js   ← Search scraping
+```
+
+The `providerManager.js` dynamically imports whichever provider is active and returns it. Routes never import providers directly — they always go through `getProvider()`.
 
 ---
 
 ## 🔌 Adding a New Provider
 
-1. Create `providers/yourprovider/` with `index.js`, `parser.js`, `anime.js`, `search.js`
-2. Add base URL to `constants/baseurl.js`
-3. Register in `core/providerManager.js`
-4. Set `PROVIDER=yourprovider` in `.env`
+1. **Create the folder:**
+   ```
+   providers/hianime/
+   ├── index.js
+   ├── parser.js
+   ├── anime.js
+   └── search.js
+   ```
+
+2. **Implement the same exports** as `toonstream/index.js`:
+   ```js
+   export { search } from "./search.js";
+   export { getAnimeDetails, getMovieDetails, getEpisodeSources, getRecent, getTrending, getRecentMovies } from "./anime.js";
+   ```
+
+3. **Register the provider** in `core/config.js`:
+   ```js
+   providers: ["toonstream", "hianime"],
+   ```
+
+4. **Add the base URL** in `constants/baseurl.js`:
+   ```js
+   hianime: "https://hianime.to",
+   ```
+
+5. **Set the active provider** in `.env`:
+   ```
+   DEFAULT_PROVIDER=hianime
+   ```
+
+That's it. No route changes needed.
 
 ---
 
-## 📦 Dependencies
+## 📝 License
 
-| Package | Purpose |
-|---|---|
-| `hono` | Fast web framework |
-| `@hono/node-server` | Node.js adapter for Hono |
-| `axios` | HTTP requests |
-| `cheerio` | HTML parsing |
-| `dotenv` | Environment variables |
-
----
-
-## ⚠️ Disclaimer
-
-This API is for educational purposes only. Please respect copyright laws and the terms of service of the source website.
-
----
-
-Made with ❤️ — [ToonStream](https://toonstream.vip)
+MIT — use freely, contribute back if you improve it.

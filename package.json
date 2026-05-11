@@ -1,18 +1,19 @@
 {
   "name": "toonstream-api",
   "version": "1.0.0",
+  "description": "Lightweight modular anime scraping API for ToonStream",
   "type": "module",
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
-    "dev": "node --watch -e \"import('@hono/node-server').then(m => import('./api/index.js').then(a => m.serve({ fetch: a.default, port: 3000 })))\"",
-    "start": "node -e \"import('@hono/node-server').then(m => import('./api/index.js').then(a => m.serve({ fetch: a.default, port: 3000 })))\""
+    "dev": "node --watch api/index.js",
+    "start": "node api/index.js"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
-    "axios": "^1.7.9",
+    "axios": "^1.9.0",
     "cheerio": "^1.0.0",
-    "hono": "^4.7.4"
+    "hono": "^4.7.11"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
