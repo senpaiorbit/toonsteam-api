@@ -1,220 +1,318 @@
-/**
- * toonstream/anime.js
- * Provider methods — fetch + parse for each page type.
- *
- * FIX in getSeasonEpisodes:
- *   The admin-ajax.php endpoint returns a FULL WordPress page HTML (not a
- *   fragment). The episode list is inside ul#episode_by_temp.
- *   Old selector: "li article.episodes"  ← works but misses articles without
- *   the class in some responses. Use the same robust selector as parseEpisodeList:
- *   "#episode_by_temp li article"
- *
- *   Also: the old code used a dynamic import of cheerio/axios inside the function.
- *   Moved to top-level static imports for reliability on Vercel.
- */
+// ============================================================
+// providers/toonstream/anime.js
+// Scraping logic for:
+//   - Anime / series details
+//   - Movie details
+//   - Episode streaming sources
+//   - Recent (latest updated) anime
+//   - Trending anime
+// ============================================================
 
-import http from "../../utils/http.js";
-import cache from "../../utils/cache.js";
-import { BASE_URLS } from "../../constants/baseurl.js";
-import { normalizeImageUrl, extractSlugFromUrl } from "../../utils/dom.js";
+import { fetchHtml } from "../../utils/http.js";
+import { loadHtml, normaliseImageUrl, extractSlug } from "../../utils/dom.js";
 import {
-  parseHomePage,
-  parseSeriesPage,
-  parseEpisodePage,
-  parseMoviesListPage,
-  parseMovieSinglePage,
-  parseCategoryPage,
-  parseCastPage,
-  parseLetterPage,
+  parseCardList,
+  parseGenres,
+  parseEpisodeList,
+  parseSources,
+  parseSeasons,
+  parseEpisodeNav,
 } from "./parser.js";
+import { cacheGet, cacheSet } from "../../utils/cache.js";
+import { TOONSTREAM_BASE } from "../../constants/baseurl.js";
 
-const BASE = BASE_URLS.toonstream;
+// ─── Helpers ────────────────────────────────────────────────
 
-// ─── HOME ─────────────────────────────────────────────────────────────────────
-
-export async function getHome() {
-  const cacheKey = "home";
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const html = await http.fetchPage(`${BASE}/home/`, BASE);
-  const data = parseHomePage(html);
-  cache.set(cacheKey, data, "home");
-  return data;
+/**
+ * Build the full URL for a series by its slug.
+ * @param {string} id - slug, e.g. "jujutsu-kaisen"
+ */
+function seriesUrl(id) {
+  return `${TOONSTREAM_BASE}/series/${id}/`;
 }
 
-// ─── SERIES ───────────────────────────────────────────────────────────────────
-
-export async function getSeriesInfo(slug) {
-  const cacheKey = `series:${slug}`;
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const url = `${BASE}/series/${slug}/`;
-  const html = await http.fetchPage(url, BASE, { referer: `${BASE}/home/` });
-  const data = parseSeriesPage(html, slug);
-  cache.set(cacheKey, data, "series");
-  return data;
+/**
+ * Build the full URL for a movie by its slug.
+ */
+function movieUrl(id) {
+  return `${TOONSTREAM_BASE}/movies/${id}/`;
 }
 
-// ─── SEASON EPISODES (AJAX) ───────────────────────────────────────────────────
-//
-// FIX: The wp-admin/admin-ajax.php endpoint returns a full WordPress page.
-// The episode list is in ul#episode_by_temp inside that page.
-// Use "#episode_by_temp li article" — same selector as parseEpisodeList().
-//
-// Also guard: if the response has no #episode_by_temp, fall back to
-// "li article.episodes" for safety.
+/**
+ * Build the full URL for an episode by its slug.
+ */
+function episodeUrl(id) {
+  return `${TOONSTREAM_BASE}/episode/${id}/`;
+}
 
-export async function getSeasonEpisodes(postId, seasonNumber) {
-  const cacheKey = `episodes:${postId}:${seasonNumber}`;
-  const cached = cache.get(cacheKey);
+// ─── Series / Anime Details ─────────────────────────────────
+
+/**
+ * Fetch full details for a series (anime) by its slug.
+ * Scrapes: title, description, genres, year, seasons, episodes.
+ *
+ * @param {string} id - Series slug (e.g. "jujutsu-kaisen")
+ * @returns {Promise<object>}
+ */
+export async function getAnimeDetails(id) {
+  const cacheKey = `series:${id}`;
+  const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  const ajaxUrl = `${BASE}/wp-admin/admin-ajax.php`;
-  let episodes = [];
+  const url = seriesUrl(id);
+  const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
+  const $ = loadHtml(html);
 
-  try {
-    // FIX: use http.postAndParse — normalises protocol-relative image URLs
-    // automatically and returns a ready cheerio $ instance.
-    const $ = await http.postAndParse(
-      ajaxUrl,
-      new URLSearchParams({
-        action: "action_select_season",
-        season: seasonNumber,
-        post: postId,
-      }),
-      BASE
-    );
+  // Basic metadata
+  const title = $("h1.entry-title").first().text().trim();
+  const image = normaliseImageUrl(
+    $(".post-thumbnail figure img").first().attr("src") || ""
+  );
+  const description = $(".description p").first().text().trim();
+  const year = $("span.year").first().text().trim();
+  const rating = $("span.vote span.num").first().text().trim();
+  const duration = $("span.duration").first().text().trim();
+  const views = $("span.views span").first().text().trim();
 
-    // Primary: use #episode_by_temp (full-page response structure)
-    const container = $("#episode_by_temp");
-    const selector  = container.length
-      ? "#episode_by_temp li article"
-      : "li article";
+  // Season + episode counts from the meta spans
+  const totalSeasons = $("span.seasons span").first().text().trim();
+  const totalEpisodes = $("span.episodes span").first().text().trim();
 
-    $(selector).each((_, el) => {
-      const href  = $(el).find("a.lnk-blk").attr("href") || null;
-      const title = $(el).find(".entry-title").text().trim() || null;
-      const imgEl = $(el).find("img").first();
-      const image = normalizeImageUrl(imgEl.attr("src") || imgEl.attr("data-src"));
-      const epNum = $(el).find(".num-epi").text().trim() || null;
-      const time  = $(el).find(".time").text().trim() || null;
+  const genres = parseGenres($);
+  const seasons = parseSeasons($);
+  const episodes = parseEpisodeList($);
 
-      if (title || href) {
-        episodes.push({
-          title,
-          episodeNumber: epNum,
-          image,
-          time,
-          url: href,
-          slug: extractSlugFromUrl(href),
-        });
-      }
-    });
-  } catch {
-    // AJAX failed — return empty, caller handles gracefully
+  // Cast
+  const cast = [];
+  $("ul.cast-lst li").each((_, el) => {
+    const label = $(el).find("span").first().text().trim();
+    const names = [];
+    $(el).find("a").each((__, a) => names.push($(a).text().trim()));
+    if (label && names.length) cast.push({ label, names });
+  });
+
+  const result = {
+    id,
+    title,
+    url,
+    image,
+    description,
+    year: year || null,
+    rating: rating || null,
+    duration: duration || null,
+    views: views || null,
+    totalSeasons: totalSeasons ? parseInt(totalSeasons, 10) : null,
+    totalEpisodes: totalEpisodes ? parseInt(totalEpisodes, 10) : null,
+    genres,
+    seasons,
+    cast,
+    episodes,
+  };
+
+  cacheSet(cacheKey, result);
+  return result;
+}
+
+// ─── Movie Details ──────────────────────────────────────────
+
+/**
+ * Fetch full details for a movie by its slug.
+ *
+ * @param {string} id - Movie slug (e.g. "jujutsu-kaisen-0")
+ * @returns {Promise<object>}
+ */
+export async function getMovieDetails(id) {
+  const cacheKey = `movie:${id}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const url = movieUrl(id);
+  const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
+  const $ = loadHtml(html);
+
+  const title = $("h1.entry-title").first().text().trim();
+  const image = normaliseImageUrl(
+    $(".post-thumbnail figure img").first().attr("src") || ""
+  );
+  const description = $(".description p").first().text().trim();
+  const year = $("span.year").first().text().trim();
+  const rating = $("span.vote span.num").first().text().trim();
+  const duration = $("span.duration").first().text().trim();
+
+  const genres = parseGenres($);
+  const sources = parseSources($);
+
+  // Cast & Director
+  const cast = [];
+  $("ul.cast-lst li").each((_, el) => {
+    const label = $(el).find("span").first().text().trim();
+    const names = [];
+    $(el).find("a").each((__, a) => names.push($(a).text().trim()));
+    if (label && names.length) cast.push({ label, names });
+  });
+
+  // Related movies
+  const related = parseCardList($, ".owl-carousel .post");
+
+  const result = {
+    id,
+    title,
+    url,
+    image,
+    description,
+    year: year || null,
+    rating: rating || null,
+    duration: duration || null,
+    genres,
+    cast,
+    sources,
+    related,
+  };
+
+  cacheSet(cacheKey, result);
+  return result;
+}
+
+// ─── Episode Streaming Sources ──────────────────────────────
+
+/**
+ * Fetch streaming server sources for an episode.
+ * ToonStream episode URLs: /episode/jujutsu-kaisen-1x1/
+ *
+ * @param {string} id - Episode slug (e.g. "jujutsu-kaisen-1x1")
+ * @returns {Promise<object>}
+ */
+export async function getEpisodeSources(id) {
+  const cacheKey = `episode:${id}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const url = episodeUrl(id);
+  const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
+  const $ = loadHtml(html);
+
+  const title = $("h1.entry-title").first().text().trim();
+  const image = normaliseImageUrl(
+    $(".post-thumbnail figure img").first().attr("src") || ""
+  );
+  const description = $(".description").first().text().trim();
+  const year = $("span.year").first().text().trim();
+  const duration = $("span.duration").first().text().trim();
+  const rating = $("span.vote span.num").first().text().trim();
+  const genres = parseGenres($);
+
+  const sources = parseSources($);
+  const nav = parseEpisodeNav($);
+
+  // Season episode list shown below the player
+  const episodes = parseEpisodeList($);
+
+  const result = {
+    id,
+    title,
+    url,
+    image,
+    description: description || null,
+    year: year || null,
+    duration: duration || null,
+    rating: rating || null,
+    genres,
+    sources,
+    navigation: nav,
+    episodes,
+  };
+
+  // Cache episodes for 5 minutes (sources don't change often)
+  cacheSet(cacheKey, result, 300);
+  return result;
+}
+
+// ─── Recent (Latest Updated) ────────────────────────────────
+
+/**
+ * Scrape recently updated anime from the main series archive.
+ * URL: /series/ — newest additions are at the top.
+ *
+ * @returns {Promise<object[]>}
+ */
+export async function getRecent() {
+  const cacheKey = "recent";
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const url = `${TOONSTREAM_BASE}/series/`;
+  const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
+  const $ = loadHtml(html);
+
+  const results = parseCardList($);
+
+  // Cache for 3 minutes (updates frequently)
+  cacheSet(cacheKey, results, 180);
+  return results;
+}
+
+// ─── Trending ───────────────────────────────────────────────
+
+/**
+ * Scrape trending anime from the homepage.
+ * ToonStream's homepage shows featured/trending content in carousels.
+ * We fall back to the series archive if the home page structure differs.
+ *
+ * @returns {Promise<object[]>}
+ */
+export async function getTrending() {
+  const cacheKey = "trending";
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  // The /home/ page has a hero slider and trending sections
+  const url = `${TOONSTREAM_BASE}/home/`;
+  const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
+  const $ = loadHtml(html);
+
+  // Try carousel first (owl-carousel typically shows featured/trending)
+  let results = parseCardList($, ".owl-carousel li, .owl-carousel article");
+
+  // If carousel is empty, fall back to the first post list on the page
+  if (!results.length) {
+    results = parseCardList($);
   }
 
-  cache.set(cacheKey, episodes, "series");
-  return episodes;
+  // If still empty, fall back to series archive
+  if (!results.length) {
+    return getRecent();
+  }
+
+  // Deduplicate by URL
+  const seen = new Set();
+  const unique = results.filter((item) => {
+    if (seen.has(item.url)) return false;
+    seen.add(item.url);
+    return true;
+  });
+
+  // Cache for 10 minutes
+  cacheSet(cacheKey, unique, 600);
+  return unique;
 }
 
-// ─── EPISODE ──────────────────────────────────────────────────────────────────
+// ─── Recent Movies ──────────────────────────────────────────
 
-export async function getEpisodeInfo(slug) {
-  const cacheKey = `episode:${slug}`;
-  const cached = cache.get(cacheKey);
+/**
+ * Scrape recently added movies from the movies archive.
+ *
+ * @returns {Promise<object[]>}
+ */
+export async function getRecentMovies() {
+  const cacheKey = "recent-movies";
+  const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  const url = `${BASE}/episode/${slug}/`;
-  const html = await http.fetchPage(url, BASE, { referer: `${BASE}/home/` });
-  const data = parseEpisodePage(html, slug);
-  cache.set(cacheKey, data, "episode");
-  return data;
+  const url = `${TOONSTREAM_BASE}/movies/`;
+  const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
+  const $ = loadHtml(html);
+
+  const results = parseCardList($);
+  cacheSet(cacheKey, results, 180);
+  return results;
 }
-
-// ─── MOVIES ───────────────────────────────────────────────────────────────────
-
-export async function getMoviesList(page = 1) {
-  const cacheKey = `movies:page:${page}`;
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const url = page > 1 ? `${BASE}/movies/page/${page}/` : `${BASE}/movies/`;
-  const html = await http.fetchPage(url, BASE, { referer: `${BASE}/home/` });
-  const data = parseMoviesListPage(html);
-  cache.set(cacheKey, data, "movies");
-  return data;
-}
-
-export async function getMovieSingle(slug) {
-  const cacheKey = `movie:${slug}`;
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const url = `${BASE}/movies/${slug}/`;
-  const html = await http.fetchPage(url, BASE, { referer: `${BASE}/movies/` });
-  const data = parseMovieSinglePage(html, slug);
-  cache.set(cacheKey, data, "episode");
-  return data;
-}
-
-// ─── CATEGORY ─────────────────────────────────────────────────────────────────
-
-export async function getCategoryPage(path, page = 1) {
-  const cacheKey = `category:${path}:${page}`;
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const url =
-    page > 1 ? `${BASE}/category/${path}/page/${page}/` : `${BASE}/category/${path}/`;
-  const html = await http.fetchPage(url, BASE, { referer: `${BASE}/home/` });
-  const data = parseCategoryPage(html, path);
-  cache.set(cacheKey, data, "category");
-  return data;
-}
-
-// ─── CAST ─────────────────────────────────────────────────────────────────────
-
-export async function getCastPage(name, page = 1) {
-  const cacheKey = `cast:${name}:${page}`;
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const url =
-    page > 1 ? `${BASE}/cast_tv/${name}/page/${page}/` : `${BASE}/cast_tv/${name}/`;
-  const html = await http.fetchPage(url, BASE, { referer: `${BASE}/home/` });
-  const data = parseCastPage(html, name);
-  cache.set(cacheKey, data, "cast");
-  return data;
-}
-
-// ─── LETTER ───────────────────────────────────────────────────────────────────
-
-export async function getLetterPage(letter, page = 1) {
-  const cacheKey = `letter:${letter}:${page}`;
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const url =
-    page > 1
-      ? `${BASE}/home/letter/${letter}/page/${page}/`
-      : `${BASE}/home/letter/${letter}/`;
-  const html = await http.fetchPage(url, BASE, { referer: `${BASE}/home/` });
-  const data = parseLetterPage(html, letter);
-  cache.set(cacheKey, data, "letter");
-  return data;
-}
-
-export default {
-  getHome,
-  getSeriesInfo,
-  getSeasonEpisodes,
-  getEpisodeInfo,
-  getMoviesList,
-  getMovieSingle,
-  getCategoryPage,
-  getCastPage,
-  getLetterPage,
-};

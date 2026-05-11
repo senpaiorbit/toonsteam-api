@@ -1,46 +1,49 @@
-import http from "../../utils/http.js";
-import cache from "../../utils/cache.js";
-import { BASE_URLS } from "../../constants/baseurl.js";
-import { parseSearchPage, parseLetterPage } from "./parser.js";
+// ============================================================
+// providers/toonstream/search.js
+// Search scraping logic for ToonStream.
+//
+// ToonStream search URL pattern: https://toonstream.vip/?s=naruto
+// Results page is the same WordPress list layout as all other pages.
+// ============================================================
 
-const BASE = BASE_URLS.toonstream;
+import { fetchHtml } from "../../utils/http.js";
+import { loadHtml, extractSlug } from "../../utils/dom.js";
+import { parseCardList } from "./parser.js";
+import { cacheGet, cacheSet } from "../../utils/cache.js";
+import { TOONSTREAM_BASE } from "../../constants/baseurl.js";
 
-export async function searchAnime(query, page = 1) {
-  if (!query || query.trim().length < 1) {
-    throw Object.assign(new Error("Search query is required"), { status: 400 });
-  }
+/**
+ * Search ToonStream for anime/series/movies by title.
+ *
+ * @param {string} query - Search term (e.g. "naruto", "jujutsu kaisen")
+ * @returns {Promise<object[]>} Array of result cards
+ */
+export async function search(query) {
+  if (!query || !query.trim()) return [];
 
   const q = query.trim();
-  const cacheKey = `search:${q}:${page}`;
-  const cached = cache.get(cacheKey);
+  const cacheKey = `search:${q.toLowerCase()}`;
+
+  // Return cached result if available
+  const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  const encodedQ = encodeURIComponent(q);
-  const url =
-    page > 1
-      ? `${BASE}/search/${encodedQ}/page/${page}/`
-      : `${BASE}/search/${encodedQ}/`;
+  // ToonStream uses WordPress's ?s= parameter for search
+  const url = `${TOONSTREAM_BASE}/?s=${encodeURIComponent(q)}`;
 
-  const html = await http.fetchPage(url, BASE, { referer: `${BASE}/home/` });
-  const data = parseSearchPage(html, q);
-  cache.set(cacheKey, data, "search");
-  return data;
+  const html = await fetchHtml(url, { referer: TOONSTREAM_BASE });
+  const $ = loadHtml(html);
+
+  const results = parseCardList($);
+
+  // Enrich results with type-aware URLs
+  const enriched = results.map((card) => ({
+    ...card,
+    id: extractSlug(card.url),
+  }));
+
+  // Cache for 2 minutes (search results change less often)
+  cacheSet(cacheKey, enriched, 120);
+
+  return enriched;
 }
-
-export async function browseByLetter(letter, page = 1) {
-  const cacheKey = `letter:${letter}:${page}`;
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const url =
-    page > 1
-      ? `${BASE}/home/letter/${letter}/page/${page}/`
-      : `${BASE}/home/letter/${letter}/`;
-
-  const html = await http.fetchPage(url, BASE, { referer: `${BASE}/home/` });
-  const data = parseLetterPage(html, letter);
-  cache.set(cacheKey, data, "letter");
-  return data;
-}
-
-export default { searchAnime, browseByLetter };
