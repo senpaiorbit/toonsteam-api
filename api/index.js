@@ -84,6 +84,7 @@ app.get("/", (c) => {
       endpoints: {
         home: "GET /home",
         health: "GET /health",
+        test: "GET /test?url=<encoded-url>",
         series: "GET /series/:slug",
         seriesWithSeasons: "GET /series/:slug?seasons=1,2&src=true&server=all",
         episode: "GET /episode/:slug",
@@ -114,6 +115,58 @@ app.get("/health", (c) => {
       timestamp: new Date().toISOString(),
     },
   });
+});
+
+// ─── TEST (fetch proxy — returns raw HTML of any URL) ─────────────────────────
+//
+// FIX: /api/test was a standalone Vercel function (api/test.js) using the raw
+// Node.js (req, res) handler style. That file is NOT auto-registered as a Hono
+// route, so hitting /test returned 404.
+//
+// Solution: register the same logic here as a proper Hono GET /test route.
+// The original test.js file can remain for direct Vercel function access at
+// /api/test, but this route makes it reachable through the Hono app as /test.
+//
+// Usage: GET /test?url=https%3A%2F%2Ftoonstream.vip%2Fhome%2F
+// Returns the raw HTML of the target URL as text/plain.
+
+app.get("/test", async (c) => {
+  const url = c.req.query("url");
+
+  if (!url) {
+    return c.text("Missing ?url= parameter", 400);
+  }
+
+  let targetUrl;
+  try {
+    targetUrl = new URL(url);
+  } catch {
+    return c.text("Invalid URL — must be a fully qualified URL (https://...)", 400);
+  }
+
+  try {
+    const response = await fetch(targetUrl.toString(), {
+      method: "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        Referer: targetUrl.origin,
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+
+    const html = await response.text();
+
+    // Return raw HTML as plain text (same as the original test.js)
+    c.header("Content-Type", "text/plain; charset=utf-8");
+    c.header("X-Content-Type-Options", "nosniff");
+    return c.body(html, response.status);
+  } catch (error) {
+    c.header("Content-Type", "text/plain; charset=utf-8");
+    return c.text(`Scraper Error\n\n${error.message}`, 500);
+  }
 });
 
 // ─── HOME ────────────────────────────────────────────────────────────────────
@@ -485,8 +538,7 @@ app.onError((error, c) => {
 });
 
 // ─── EXPORT FOR VERCEL ───────────────────────────────────────────────────────
-// Vercel Node.js serverless functions use (req, res) — not Web Fetch API.
-// We use @hono/node-server's handle() to bridge Hono → Node.js http.
+
 import { handle } from "@hono/node-server/vercel";
 
 export default handle(app);
