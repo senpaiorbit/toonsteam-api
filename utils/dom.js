@@ -1,60 +1,104 @@
-export function normalizeImageUrl(src) {
-  if (!src) return null;
-  src = src.trim();
-  // Protocol-relative  → https
-  if (src.startsWith("//")) return "https:" + src;
-  // Already absolute
-  if (src.startsWith("http://") || src.startsWith("https://")) return src;
-  // Relative path — prepend origin placeholder so callers know it's relative
-  if (src.startsWith("/")) return "https://toonstream.vip" + src;
+// ============================================================
+// utils/dom.js
+// Cheerio helper functions for safe DOM parsing.
+// All selectors return empty fallbacks instead of crashing.
+// ============================================================
+
+import * as cheerio from "cheerio";
+
+/**
+ * Load an HTML string into a Cheerio instance.
+ *
+ * @param {string} html
+ * @returns {cheerio.CheerioAPI}
+ */
+export function loadHtml(html) {
+  return cheerio.load(html);
+}
+
+/**
+ * Safely get trimmed text from a selector.
+ * Returns empty string if element doesn't exist.
+ *
+ * @param {cheerio.CheerioAPI} $ - Loaded cheerio instance
+ * @param {string} selector
+ * @returns {string}
+ */
+export function safeText($, selector) {
+  try {
+    return $(selector).first().text().trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Safely get an attribute value from a selector.
+ * Returns empty string if element or attribute doesn't exist.
+ *
+ * @param {cheerio.CheerioAPI} $ - Loaded cheerio instance
+ * @param {string} selector
+ * @param {string} attr - Attribute name (e.g. "href", "src")
+ * @returns {string}
+ */
+export function safeAttr($, selector, attr) {
+  try {
+    return $(selector).first().attr(attr)?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Normalise an image URL.
+ * ToonStream uses protocol-relative URLs like "//image.tmdb.org/..."
+ * This adds "https:" to make them absolute.
+ *
+ * @param {string} src
+ * @returns {string}
+ */
+export function normaliseImageUrl(src) {
+  if (!src) return "";
+  if (src.startsWith("//")) return `https:${src}`;
   return src;
 }
 
-export function extractSlugFromUrl(url) {
-  if (!url) return null;
-  return url.replace(/\/$/, "").split("/").pop();
+/**
+ * Extract the slug from a ToonStream URL.
+ * E.g. "https://toonstream.vip/series/jujutsu-kaisen/" → "jujutsu-kaisen"
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+export function extractSlug(url) {
+  if (!url) return "";
+  // Remove trailing slash and split — last segment is the slug
+  const parts = url.replace(/\/$/, "").split("/");
+  return parts[parts.length - 1] || "";
 }
 
-export function parsePostCard($, el) {
-  const $el = $(el);
-  const url = $el.find("a.lnk-blk").attr("href") || null;
-  const title = $el.find(".entry-title").text().trim();
-  const image = normalizeImageUrl($el.find("img").first().attr("src"));
-  const rating = $el.find(".vote").text().replace("TMDB", "").trim() || null;
-  const id = $el.closest("li[id]").attr("id") || null;
-
-  let contentType = "series";
-  if (url?.includes("/movies/")) contentType = "movie";
-  else if (url?.includes("/episode/")) contentType = "episode";
-
-  const liClass = $el.closest("li").attr("class") || "";
-  const categories = (liClass.match(/category-([^\s]+)/g) || [])
-    .map((c) => c.replace("category-", "").replace(/-/g, " "))
-    .map((c) => c.charAt(0).toUpperCase() + c.slice(1));
-
-  return { id, title, image, url, rating, contentType, categories };
+/**
+ * Extract post ID from a WordPress list-item class string.
+ * E.g. "post-1914 series type-series ..." → "1914"
+ *
+ * @param {string} classStr
+ * @returns {string}
+ */
+export function extractPostId(classStr) {
+  if (!classStr) return "";
+  const match = classStr.match(/\bpost-(\d+)\b/);
+  return match ? match[1] : "";
 }
 
-export function parseEpisodeCard($, el) {
-  const $el = $(el);
-  const url = $el.find("a.lnk-blk").attr("href") || null;
-  const title = $el.find(".entry-title").text().trim();
-  const image = normalizeImageUrl($el.find("img").first().attr("src"));
-  const episodeNumber = $el.find(".num-epi").text().trim();
-  const time = $el.find(".time").text().trim();
-  return { title, image, episodeNumber, time, url };
+/**
+ * Extract type ("movies" or "series") from a list-item class string.
+ *
+ * @param {string} classStr
+ * @returns {"movies"|"series"|""}
+ */
+export function extractType(classStr) {
+  if (!classStr) return "";
+  if (classStr.includes("type-movies")) return "movies";
+  if (classStr.includes("type-series")) return "series";
+  return "";
 }
-
-export function parsePagination($) {
-  const current = parseInt($(".pagination .current, .page-numbers.current").text().trim()) || 1;
-  const pages = [];
-  $(".pagination a.page-numbers, .page-numbers:not(.current):not(.next):not(.prev)").each((_, el) => {
-    const n = parseInt($(el).text().trim());
-    if (!isNaN(n)) pages.push(n);
-  });
-  const totalPages = pages.length ? Math.max(...pages, current) : current;
-  const hasNext = !!$(".pagination .next, .page-numbers.next").length;
-  return { currentPage: current, totalPages, hasNext };
-}
-
-export default { normalizeImageUrl, extractSlugFromUrl, parsePostCard, parseEpisodeCard, parsePagination };

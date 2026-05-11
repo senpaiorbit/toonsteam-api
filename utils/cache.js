@@ -1,38 +1,76 @@
+// ============================================================
+// utils/cache.js
+// Simple in-memory key-value cache with TTL support.
+// No external dependencies — just a Map + timestamps.
+// ============================================================
+
+import config from "../core/config.js";
+
+/** Internal store: key → { value, expiresAt } */
 const store = new Map();
 
-const TTL = {
-  home: 5 * 60 * 1000,
-  search: 5 * 60 * 1000,
-  series: 30 * 60 * 1000,
-  episode: 30 * 60 * 1000,
-  stream: 60 * 60 * 1000,
-  category: 10 * 60 * 1000,
-  movies: 10 * 60 * 1000,
-  cast: 10 * 60 * 1000,
-  letter: 10 * 60 * 1000,
-};
-
-export function get(key) {
+/**
+ * Get a cached value. Returns null if missing or expired.
+ *
+ * @param {string} key
+ * @returns {any|null}
+ */
+export function cacheGet(key) {
   const entry = store.get(key);
   if (!entry) return null;
+
+  // Evict if expired
   if (Date.now() > entry.expiresAt) {
     store.delete(key);
     return null;
   }
+
   return entry.value;
 }
 
-export function set(key, value, type = "search") {
-  const ttl = TTL[type] ?? TTL.search;
-  store.set(key, { value, expiresAt: Date.now() + ttl });
+/**
+ * Store a value in the cache with a TTL.
+ *
+ * @param {string} key
+ * @param {any} value
+ * @param {number} [ttl] - Seconds until expiry. Defaults to config value.
+ */
+export function cacheSet(key, value, ttl) {
+  const ttlMs = (ttl ?? config.cache.ttl) * 1000;
+
+  // Evict oldest entry if cache is full
+  if (store.size >= config.cache.maxSize) {
+    const oldestKey = store.keys().next().value;
+    store.delete(oldestKey);
+  }
+
+  store.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs,
+  });
 }
 
-export function del(key) {
+/**
+ * Remove a specific key from the cache.
+ *
+ * @param {string} key
+ */
+export function cacheDel(key) {
   store.delete(key);
 }
 
-export function clear() {
+/**
+ * Clear all cache entries.
+ */
+export function cacheClear() {
   store.clear();
 }
 
-export default { get, set, del, clear };
+/**
+ * Return current cache size (for debugging / health checks).
+ *
+ * @returns {number}
+ */
+export function cacheSize() {
+  return store.size;
+}
